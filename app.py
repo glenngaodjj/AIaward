@@ -936,7 +936,7 @@ DASHBOARD_HTML = BASE_STYLE + r"""
       </div>
       {% endif %}
       <button class="btn btn-g" onclick="startEval()" id="evalBtn"
-              {% if month_count < 2 %}disabled title="至少需要2份作品"{% endif %}>
+              >
         🚀 开始评审 {{ current_month }}
       </button>
     </div>
@@ -1349,8 +1349,8 @@ def admin_evaluate():
         "SELECT * FROM submissions WHERE month=? ORDER BY created_at ASC", (month,)
     ).fetchall()
 
-    if len(rows) < 2:
-        return jsonify({'error': f'{month} 至少需要 2 份作品才能评审'}), 400
+    if len(rows) < 1:
+        return jsonify({'error': f'{month} 暂无参赛作品'}), 400
 
     client = anthropic.Anthropic(api_key=api_key)
 
