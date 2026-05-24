@@ -1013,50 +1013,60 @@ def submit_form():
 
 @app.route('/', methods=['POST'])
 def submit_post():
-    month      = datetime.now().strftime('%Y年%m月')
-    name       = request.form.get('name','').strip()
-    department = request.form.get('department','').strip()
-    note       = request.form.get('note','').strip()
+    month = datetime.now().strftime('%Y年%m月')
+    try:
+        name       = request.form.get('name','').strip()
+        department = request.form.get('department','').strip()
+        note       = request.form.get('note','').strip()
 
-    if not name or not note:
-        return render_template_string(SUBMIT_HTML, month=month, success=False,
-                                      error='请填写姓名和简要说明（必填项）')
+        if not name or not note:
+            return render_template_string(SUBMIT_HTML, month=month, success=False,
+                                          error='请填写姓名和简要说明（必填项）')
 
-    # Parse links
-    raw_links = request.form.getlist('links')
-    links = [u.strip() for u in raw_links if u.strip()]
-    links_json = json.dumps(links, ensure_ascii=False)
+        # Parse links
+        raw_links = request.form.getlist('links')
+        links = [u.strip() for u in raw_links if u.strip()]
+        links_json = json.dumps(links, ensure_ascii=False)
 
-    db = get_db()
-    cur = db.execute(
-        "INSERT INTO submissions (name,department,note,links,month) VALUES (?,?,?,?,?)",
-        (name, department, note, links_json, month)
-    )
-    sub_id = cur.lastrowid
-
-    # Save files
-    file_count = 0
-    uploaded_files = request.files.getlist('files')
-    for f in uploaded_files:
-        if not f or not f.filename:
-            continue
-        fname = f.filename
-        ext   = fname.rsplit('.',1)[-1].lower() if '.' in fname else ''
-        if ext not in ALLOWED_EXTS:
-            continue
-        data = f.read()
-        db.execute(
-            "INSERT INTO submission_files (submission_id,file_name,file_ext,file_data) VALUES (?,?,?,?)",
-            (sub_id, fname, ext, data)
+        db = get_db()
+        cur = db.execute(
+            "INSERT INTO submissions (name,department,note,links,month) VALUES (?,?,?,?,?)",
+            (name, department, note, links_json, month)
         )
-        file_count += 1
+        sub_id = cur.lastrowid
 
-    db.commit()
+        # Save files
+        file_count = 0
+        uploaded_files = request.files.getlist('files')
+        for f in uploaded_files:
+            if not f or not f.filename:
+                continue
+            fname = f.filename
+            ext   = fname.rsplit('.',1)[-1].lower() if '.' in fname else ''
+            if ext not in ALLOWED_EXTS:
+                continue
+            data = f.read()
+            db.execute(
+                "INSERT INTO submission_files (submission_id,file_name,file_ext,file_data) VALUES (?,?,?,?)",
+                (sub_id, fname, ext, data)
+            )
+            file_count += 1
 
-    return render_template_string(
-        SUBMIT_HTML, month=month, success=True,
-        submitted_name=name, file_count=file_count, link_count=len(links), error=None
-    )
+        db.commit()
+
+        return render_template_string(
+            SUBMIT_HTML, month=month, success=True,
+            submitted_name=name, file_count=file_count, link_count=len(links), error=None
+        )
+
+    except Exception as e:
+        import traceback
+        err_detail = traceback.format_exc()
+        print(f"[ERROR] submit_post: {err_detail}")
+        return render_template_string(
+            SUBMIT_HTML, month=month, success=False,
+            error=f'提交失败，请稍后重试。错误信息：{str(e)}'
+        ), 500
 
 
 @app.route('/admin', methods=['GET'])
