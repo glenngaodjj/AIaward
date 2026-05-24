@@ -590,16 +590,30 @@ SUBMIT_HTML = BASE_STYLE + r"""
 
   <div class="sec">📎 上传文件（可多选）</div>
   <div class="fg">
+    <!-- Hidden inputs -->
+    <input type="file" name="files" id="fileInput" multiple style="display:none"
+           accept=".pdf,.doc,.docx,.txt,.md,.html,.htm,.php,.py,.js,.ts,.jsx,.tsx,.css,.json,.xml,.yaml,.yml,.csv,.jpg,.jpeg,.png,.gif,.webp,.bmp,.svg,.mp4,.mov,.avi,.mkv,.webm,.m4v,.pptx,.xlsx,.xls,.rb,.java,.cpp,.c,.go,.rs,.swift,.sh,.sql">
+    <input type="file" name="files" id="folderInput" multiple webkitdirectory style="display:none">
+
     <div class="drop-zone" id="dropZone">
-      <input type="file" name="files" id="fileInput" multiple
-             accept=".pdf,.doc,.docx,.html,.htm,.jpg,.jpeg,.png,.gif,.webp,.bmp,.mp4,.mov,.avi,.mkv,.webm,.m4v">
       <div class="dz-icon">📂</div>
-      <div class="dz-title">点击选择文件，或将文件拖放到此处</div>
-      <div class="dz-sub">
-        支持：PDF · Word · HTML · 图片（JPG/PNG等）· 视频（MP4/MOV等）<br>
-        可同时选多个文件 · 单次总大小限制 200MB
-      </div>
+      <div class="dz-title">将文件拖放到此处</div>
+      <div class="dz-sub">或使用下方按钮选择文件 / 整个文件夹</div>
     </div>
+
+    <div style="display:flex;gap:10px;margin-top:10px">
+      <button type="button" onclick="document.getElementById('fileInput').click()"
+        style="flex:1;padding:10px;border:1.5px solid var(--p);border-radius:9px;
+               background:var(--pl);color:var(--p);font-size:13px;font-weight:600;cursor:pointer">
+        📄 选择文件（多选）
+      </button>
+      <button type="button" onclick="document.getElementById('folderInput').click()"
+        style="flex:1;padding:10px;border:1.5px solid var(--g);border-radius:9px;
+               background:#f0fdf4;color:#166534;font-size:13px;font-weight:600;cursor:pointer">
+        📁 选择整个文件夹
+      </button>
+    </div>
+
     <div class="file-list" id="fileList"></div>
   </div>
 
@@ -639,8 +653,26 @@ function updateCount(el,id){document.getElementById(id).textContent=el.value.len
 let selectedFiles=[];
 
 const fi=document.getElementById('fileInput');
+const foi=document.getElementById('folderInput');
 const dz=document.getElementById('dropZone');
 const fl=document.getElementById('fileList');
+
+function addFilesToList(newFiles){
+  Array.from(newFiles).forEach(f=>{
+    if(!selectedFiles.find(x=>x.name===f.name&&x.size===f.size))
+      selectedFiles.push(f);
+  });
+  syncInputFiles();
+  renderFiles();
+}
+
+function syncInputFiles(){
+  const dt=new DataTransfer();
+  selectedFiles.forEach(f=>dt.items.add(f));
+  fi.files=dt.files;
+}
+
+foi.addEventListener('change',()=>{ addFilesToList(foi.files); foi.value=''; });
 
 function renderFiles(){
   fl.innerHTML='';
@@ -666,7 +698,7 @@ function renderFiles(){
     warn.style.cssText=`margin-top:8px;padding:8px 12px;border-radius:8px;font-size:12px;font-weight:600;
       background:${over?'#fef2f2':'#f0fdf4'};color:${over?'#991b1b':'#166534'};
       border:1px solid ${over?'#fca5a5':'#86efac'}`;
-    warn.textContent=`${over?'⚠️ 超出限制！':'✅'} 已选 ${selectedFiles.length} 个文件，总大小：${fmtSize(total)} / 50MB 上限${over?'  请删除部分文件，或将大文件改用链接提交':''}`;
+    warn.textContent=`${over?'⚠️ 超出限制！':'✅'} 已选 ${selectedFiles.length} 个文件，总大小：${fmtSize(total)} / 200MB 上限${over?'  请删除部分文件，或将大文件改用链接提交':''}`;
     fl.appendChild(warn);
   }
 }
@@ -721,7 +753,7 @@ document.getElementById('subForm')?.addEventListener('submit',function(e){
   const total = selectedFiles.reduce((s,f)=>s+f.size, 0);
   if(total > MAX_BYTES){
     e.preventDefault();
-    alert(`⚠️ 文件总大小 ${fmtSize(total)} 超过限制（最大 50MB）。\n\n建议：\n• 删除部分大文件\n• 视频建议上传到 YouTube/Google Drive，再粘贴链接\n• 图片可以压缩后再上传`);
+    alert(`⚠️ 文件总大小 ${fmtSize(total)} 超过限制（最大 200MB）。\n\n建议：\n• 删除部分大文件\n• 视频建议上传到 YouTube/Google Drive，再粘贴链接\n• 图片可以压缩后再上传`);
     return;
   }
   const btn=document.getElementById('submitBtn');
