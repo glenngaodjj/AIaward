@@ -59,6 +59,7 @@ def close_db(_):
 def init_db():
     with app.app_context():
         db = sqlite3.connect(DB_PATH)
+        # Create tables (new installs)
         db.executescript("""
             CREATE TABLE IF NOT EXISTS submissions (
                 id          INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -84,6 +85,34 @@ def init_db():
                 created_at   TEXT DEFAULT (datetime('now','localtime'))
             );
         """)
+        # Migration: safely add new columns if upgrading from old schema
+        for col, definition in [('note', 'TEXT'), ('links', 'TEXT')]:
+            try:
+                db.execute(f"ALTER TABLE submissions ADD COLUMN {col} {definition}")
+            except Exception:
+                pass  # Column already exists, ignore
+        # Migration: remove old columns that would conflict (rebuild table if needed)
+        cols = [r[1] for r in db.execute("PRAGMA table_info(submissions)").fetchall()]
+        if 'title' in cols:
+            # Old schema detected — migrate data to new schema
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS submissions_new (
+                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name        TEXT NOT NULL,
+                    department  TEXT,
+                    note        TEXT,
+                    links       TEXT,
+                    month       TEXT NOT NULL,
+                    created_at  TEXT DEFAULT (datetime('now','localtime'))
+                );
+                INSERT INTO submissions_new (id, name, department, note, month, created_at)
+                    SELECT id, name, department,
+                           COALESCE(description, title, '（已迁移）'),
+                           month, created_at
+                    FROM submissions;
+                DROP TABLE submissions;
+                ALTER TABLE submissions_new RENAME TO submissions;
+            """)
         db.commit()
         db.close()
 
