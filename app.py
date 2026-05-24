@@ -21,26 +21,49 @@ import anthropic
 # ── App Config ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
-app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024   # 300 MB total
+app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500 MB (gunicorn streams to disk)
 
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', 'admin123')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
 DB_PATH           = os.environ.get('DB_PATH', 'submissions.db')
+UPLOAD_DIR        = os.environ.get('UPLOAD_DIR', 'uploaded_files')
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
 ALLOWED_EXTS = {
-    'pdf', 'doc', 'docx', 'html', 'htm',
-    'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp',
+    # Documents
+    'pdf', 'doc', 'docx', 'txt', 'md', 'rtf',
+    # Web / Code
+    'html', 'htm', 'php', 'py', 'js', 'ts', 'jsx', 'tsx',
+    'css', 'scss', 'less', 'vue', 'rb', 'java', 'cpp', 'c',
+    'h', 'cs', 'go', 'rs', 'swift', 'kt', 'sh', 'sql',
+    # Data
+    'json', 'xml', 'yaml', 'yml', 'csv', 'tsv',
+    # Images
+    'jpg', 'jpeg', 'png', 'gif', 'webp', 'bmp', 'svg',
+    # Video
     'mp4', 'mov', 'avi', 'mkv', 'webm', 'm4v',
+    # Presentation / Spreadsheet (read as zip/text)
+    'pptx', 'xlsx', 'xls',
 }
 
 def file_cat(ext):
     ext = ext.lower()
-    if ext == 'pdf':                                      return 'pdf'
-    if ext in ('doc','docx'):                             return 'word'
-    if ext in ('html','htm'):                             return 'html'
-    if ext in ('jpg','jpeg','png','gif','webp','bmp'):    return 'image'
-    if ext in ('mp4','mov','avi','mkv','webm','m4v'):     return 'video'
-    return 'unknown'
+    if ext == 'pdf':
+        return 'pdf'
+    if ext in ('doc','docx'):
+        return 'word'
+    if ext in ('html','htm'):
+        return 'html'
+    if ext in ('jpg','jpeg','png','gif','webp','bmp'):
+        return 'image'
+    if ext in ('mp4','mov','avi','mkv','webm','m4v'):
+        return 'video'
+    if ext in ('pptx',):
+        return 'pptx'
+    if ext in ('xlsx','xls'):
+        return 'xlsx'
+    # All remaining: treat as plain text (code, data, markup, etc.)
+    return 'text'
 
 
 # ── Database ───────────────────────────────────────────────────────────────────
@@ -75,7 +98,7 @@ def init_db():
                 submission_id INTEGER NOT NULL,
                 file_name     TEXT NOT NULL,
                 file_ext      TEXT NOT NULL,
-                file_data     BLOB NOT NULL,
+                file_path     TEXT NOT NULL,
                 FOREIGN KEY(submission_id) REFERENCES submissions(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS evaluations (
@@ -85,34 +108,58 @@ def init_db():
                 created_at   TEXT DEFAULT (datetime('now','localtime'))
             );
         """)
-        # Migration: safely add new columns if upgrading from old schema
+        # Migration: add new columns to submissions if missing
         for col, definition in [('note', 'TEXT'), ('links', 'TEXT')]:
             try:
                 db.execute(f"ALTER TABLE submissions ADD COLUMN {col} {definition}")
             except Exception:
-                pass  # Column already exists, ignore
-        # Migration: remove old columns that would conflict (rebuild table if needed)
+                pass
+
+        # Migration: rebuild submissions table if old schema (has 'title')
         cols = [r[1] for r in db.execute("PRAGMA table_info(submissions)").fetchall()]
         if 'title' in cols:
-            # Old schema detected — migrate data to new schema
             db.executescript("""
                 CREATE TABLE IF NOT EXISTS submissions_new (
-                    id          INTEGER PRIMARY KEY AUTOINCREMENT,
-                    name        TEXT NOT NULL,
-                    department  TEXT,
-                    note        TEXT,
-                    links       TEXT,
-                    month       TEXT NOT NULL,
-                    created_at  TEXT DEFAULT (datetime('now','localtime'))
+                    id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL,
+                    department TEXT, note TEXT, links TEXT, month TEXT NOT NULL,
+                    created_at TEXT DEFAULT (datetime('now','localtime'))
                 );
-                INSERT INTO submissions_new (id, name, department, note, month, created_at)
-                    SELECT id, name, department,
-                           COALESCE(description, title, '（已迁移）'),
-                           month, created_at
+                INSERT INTO submissions_new (id,name,department,note,month,created_at)
+                    SELECT id,name,department,
+                           COALESCE(description,title,'（已迁移）'),month,created_at
                     FROM submissions;
                 DROP TABLE submissions;
                 ALTER TABLE submissions_new RENAME TO submissions;
             """)
+
+        # Migration: rebuild submission_files if it still uses file_data BLOB
+        fcols = [r[1] for r in db.execute("PRAGMA table_info(submission_files)").fetchall()]
+        if 'file_data' in fcols:
+            # Old BLOB rows: save data to disk, replace table
+            old_rows = db.execute(
+                "SELECT id,submission_id,file_name,file_ext,file_data FROM submission_files"
+            ).fetchall()
+            db.execute("DROP TABLE submission_files")
+            db.execute("""
+                CREATE TABLE submission_files (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    submission_id INTEGER NOT NULL,
+                    file_name TEXT NOT NULL, file_ext TEXT NOT NULL, file_path TEXT NOT NULL,
+                    FOREIGN KEY(submission_id) REFERENCES submissions(id) ON DELETE CASCADE
+                )
+            """)
+            import uuid
+            for row in old_rows:
+                if row[4]:
+                    fname = f"{uuid.uuid4().hex}_{row[2]}"
+                    fpath = os.path.join(UPLOAD_DIR, fname)
+                    with open(fpath, 'wb') as fh:
+                        fh.write(bytes(row[4]))
+                    db.execute(
+                        "INSERT INTO submission_files (id,submission_id,file_name,file_ext,file_path) VALUES (?,?,?,?,?)",
+                        (row[0], row[1], row[2], row[3], fpath)
+                    )
+
         db.commit()
         db.close()
 
@@ -146,6 +193,44 @@ def extract_docx(data: bytes) -> str:
         return '\n'.join(p.text for p in doc.paragraphs if p.text.strip())[:8000]
     except Exception as e:
         return f'[Word解析失败: {e}]'
+
+def extract_text(data: bytes) -> str:
+    """Read any plain-text file (code, JSON, CSV, Markdown, etc.)"""
+    for enc in ('utf-8', 'gbk', 'latin-1'):
+        try:
+            return data.decode(enc)[:8000]
+        except Exception:
+            continue
+    return '[文件编码无法识别]'
+
+def extract_pptx(data: bytes) -> str:
+    try:
+        from pptx import Presentation
+        prs = Presentation(io.BytesIO(data))
+        lines = []
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, 'text') and shape.text.strip():
+                    lines.append(shape.text.strip())
+        return '\n'.join(lines)[:8000]
+    except Exception as e:
+        return f'[PPT解析失败: {e}]'
+
+def extract_xlsx(data: bytes) -> str:
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(io.BytesIO(data), read_only=True, data_only=True)
+        lines = []
+        for ws in wb.worksheets:
+            lines.append(f'[表格: {ws.title}]')
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i > 100: break
+                row_txt = '\t'.join(str(c) if c is not None else '' for c in row)
+                if row_txt.strip():
+                    lines.append(row_txt)
+        return '\n'.join(lines)[:8000]
+    except Exception as e:
+        return f'[Excel解析失败: {e}]'
 
 def extract_html_bytes(data: bytes) -> str:
     try:
@@ -236,11 +321,16 @@ def process_submission(sub: dict, files: list, client) -> str:
     links = json.loads(sub.get('links') or '[]')
     parts = []
 
-    # Process each file
+    # Process each file (read from disk)
     for frow in files:
         fname = frow['file_name']
         ext   = frow['file_ext'].lower()
-        data  = bytes(frow['file_data'])
+        fpath = frow.get('file_path','')
+        if not fpath or not os.path.exists(fpath):
+            parts.append(f'── 文件：{fname} ──\n[文件已不存在]')
+            continue
+        with open(fpath, 'rb') as fh:
+            data = fh.read()
         cat   = file_cat(ext)
         parts.append(f'── 文件：{fname} ──')
         if cat == 'pdf':
@@ -249,6 +339,12 @@ def process_submission(sub: dict, files: list, client) -> str:
             parts.append(extract_docx(data))
         elif cat == 'html':
             parts.append(extract_html_bytes(data))
+        elif cat == 'text':
+            parts.append(extract_text(data))
+        elif cat == 'pptx':
+            parts.append(extract_pptx(data))
+        elif cat == 'xlsx':
+            parts.append(extract_xlsx(data))
         elif cat == 'image':
             b64, mt = image_to_b64(data, ext)
             desc = describe_with_vision(client, [(b64,mt)], note)
@@ -260,6 +356,8 @@ def process_submission(sub: dict, files: list, client) -> str:
                 parts.append(f'[视频内容] {desc}')
             else:
                 parts.append('[视频文件（无法提取帧）]')
+        else:
+            parts.append(f'[不支持的文件类型: .{ext}]')
 
     # Fetch each URL
     for url in links:
@@ -546,7 +644,10 @@ const fl=document.getElementById('fileList');
 
 function renderFiles(){
   fl.innerHTML='';
+  const MAX_BYTES=200*1024*1024;
+  let total=0;
   selectedFiles.forEach((f,i)=>{
+    total+=f.size;
     const ext=f.name.split('.').pop().toLowerCase();
     const div=document.createElement('div');
     div.className='file-item';
@@ -555,6 +656,19 @@ function renderFiles(){
       <button type="button" class="fi-rm" onclick="removeFile(${i})">✕</button>`;
     fl.appendChild(div);
   });
+  // Show total size warning if needed
+  const existing=document.getElementById('sizeWarning');
+  if(existing)existing.remove();
+  if(selectedFiles.length>0){
+    const over=total>MAX_BYTES;
+    const warn=document.createElement('div');
+    warn.id='sizeWarning';
+    warn.style.cssText=`margin-top:8px;padding:8px 12px;border-radius:8px;font-size:12px;font-weight:600;
+      background:${over?'#fef2f2':'#f0fdf4'};color:${over?'#991b1b':'#166534'};
+      border:1px solid ${over?'#fca5a5':'#86efac'}`;
+    warn.textContent=`${over?'⚠️ 超出限制！':'✅'} 已选 ${selectedFiles.length} 个文件，总大小：${fmtSize(total)} / 50MB 上限${over?'  请删除部分文件，或将大文件改用链接提交':''}`;
+    fl.appendChild(warn);
+  }
 }
 
 function removeFile(idx){
@@ -601,9 +715,17 @@ function removeUrl(btn){
   else btn.closest('.url-row').querySelector('input').value='';
 }
 
-document.getElementById('subForm')?.addEventListener('submit',function(){
+document.getElementById('subForm')?.addEventListener('submit',function(e){
+  // Check total file size before submitting
+  const MAX_BYTES = 200 * 1024 * 1024; // 200MB
+  const total = selectedFiles.reduce((s,f)=>s+f.size, 0);
+  if(total > MAX_BYTES){
+    e.preventDefault();
+    alert(`⚠️ 文件总大小 ${fmtSize(total)} 超过限制（最大 50MB）。\n\n建议：\n• 删除部分大文件\n• 视频建议上传到 YouTube/Google Drive，再粘贴链接\n• 图片可以压缩后再上传`);
+    return;
+  }
   const btn=document.getElementById('submitBtn');
-  btn.disabled=true;btn.textContent='⏳ 提交中…';
+  btn.disabled=true;btn.textContent='⏳ 提交中（大文件可能需要1-2分钟）…';
 });
 </script>
 """
@@ -1035,7 +1157,8 @@ def submit_post():
         )
         sub_id = cur.lastrowid
 
-        # Save files
+        # Save files to disk (streaming — no memory blowup)
+        import uuid
         file_count = 0
         uploaded_files = request.files.getlist('files')
         for f in uploaded_files:
@@ -1045,10 +1168,12 @@ def submit_post():
             ext   = fname.rsplit('.',1)[-1].lower() if '.' in fname else ''
             if ext not in ALLOWED_EXTS:
                 continue
-            data = f.read()
+            safe_name = f"{uuid.uuid4().hex}_{fname}"
+            fpath = os.path.join(UPLOAD_DIR, safe_name)
+            f.save(fpath)   # streams directly to disk
             db.execute(
-                "INSERT INTO submission_files (submission_id,file_name,file_ext,file_data) VALUES (?,?,?,?)",
-                (sub_id, fname, ext, data)
+                "INSERT INTO submission_files (submission_id,file_name,file_ext,file_path) VALUES (?,?,?,?)",
+                (sub_id, fname, ext, fpath)
             )
             file_count += 1
 
@@ -1155,15 +1280,23 @@ def admin_files(sub_id):
 @login_required
 def admin_download(file_id):
     db = get_db()
-    row = db.execute("SELECT file_name,file_data FROM submission_files WHERE id=?", (file_id,)).fetchone()
-    if not row: abort(404)
-    return send_file(io.BytesIO(bytes(row['file_data'])), download_name=row['file_name'], as_attachment=True)
+    row = db.execute("SELECT file_name,file_path FROM submission_files WHERE id=?", (file_id,)).fetchone()
+    if not row or not os.path.exists(row['file_path']): abort(404)
+    return send_file(row['file_path'], download_name=row['file_name'], as_attachment=True)
 
 
 @app.route('/admin/delete/<int:sub_id>', methods=['POST'])
 @login_required
 def admin_delete(sub_id):
     db = get_db()
+    # Delete files from disk
+    frows = db.execute("SELECT file_path FROM submission_files WHERE submission_id=?", (sub_id,)).fetchall()
+    for frow in frows:
+        try:
+            if frow['file_path'] and os.path.exists(frow['file_path']):
+                os.remove(frow['file_path'])
+        except Exception:
+            pass
     db.execute("DELETE FROM submission_files WHERE submission_id=?", (sub_id,))
     db.execute("DELETE FROM submissions WHERE id=?", (sub_id,))
     db.commit()
