@@ -1,22 +1,17 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-AI创新应用月度评审系统 — 在线版 v3（支持文件上传）
-====================================================
-员工通过公开链接提交作品（姓名 + 简要说明 + 一个附件），
-管理员登录后一键AI评审。
-
-本地测试:
-  pip install flask anthropic gunicorn pdfplumber python-docx beautifulsoup4 Pillow
-  ADMIN_PASSWORD=yourpassword ANTHROPIC_API_KEY=sk-ant-... python app.py
-
-云端部署 (Railway):
-  设置环境变量 ADMIN_PASSWORD、ANTHROPIC_API_KEY、SECRET_KEY 后直接部署
+AI创新应用月度评审系统 — 在线版 v4
+====================================
+· 员工提交：姓名 + 简要说明 + 多文件上传 + 网址链接
+· 管理员：一键AI评审，自动读取所有文件/链接内容，综合评分 + 详细评语
 """
 
 import os, re, json, sqlite3, secrets, base64, io, subprocess, tempfile
 from datetime import datetime
 from functools import wraps
+from urllib.request import urlopen, Request
+from urllib.error import URLError
 from flask import (
     Flask, request, jsonify, render_template_string,
     session, redirect, url_for, g, send_file, abort
@@ -26,7 +21,7 @@ import anthropic
 # ── App Config ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', secrets.token_hex(32))
-app.config['MAX_CONTENT_LENGTH'] = 150 * 1024 * 1024   # 150 MB upload limit
+app.config['MAX_CONTENT_LENGTH'] = 300 * 1024 * 1024   # 300 MB total
 
 ADMIN_PASSWORD    = os.environ.get('ADMIN_PASSWORD', 'admin123')
 ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
@@ -40,11 +35,11 @@ ALLOWED_EXTS = {
 
 def file_cat(ext):
     ext = ext.lower()
-    if ext == 'pdf':                         return 'pdf'
-    if ext in ('doc','docx'):                return 'word'
-    if ext in ('html','htm'):                return 'html'
-    if ext in ('jpg','jpeg','png','gif','webp','bmp'): return 'image'
-    if ext in ('mp4','mov','avi','mkv','webm','m4v'):  return 'video'
+    if ext == 'pdf':                                      return 'pdf'
+    if ext in ('doc','docx'):                             return 'word'
+    if ext in ('html','htm'):                             return 'html'
+    if ext in ('jpg','jpeg','png','gif','webp','bmp'):    return 'image'
+    if ext in ('mp4','mov','avi','mkv','webm','m4v'):     return 'video'
     return 'unknown'
 
 
@@ -70,11 +65,17 @@ def init_db():
                 name        TEXT NOT NULL,
                 department  TEXT,
                 note        TEXT,
-                file_name   TEXT,
-                file_ext    TEXT,
-                file_data   BLOB,
+                links       TEXT,
                 month       TEXT NOT NULL,
                 created_at  TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS submission_files (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                submission_id INTEGER NOT NULL,
+                file_name     TEXT NOT NULL,
+                file_ext      TEXT NOT NULL,
+                file_data     BLOB NOT NULL,
+                FOREIGN KEY(submission_id) REFERENCES submissions(id) ON DELETE CASCADE
             );
             CREATE TABLE IF NOT EXISTS evaluations (
                 id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -99,45 +100,56 @@ def login_required(f):
     return decorated
 
 
-# ── File processing ────────────────────────────────────────────────────────────
+# ── File & URL Processing ──────────────────────────────────────────────────────
 def extract_pdf(data: bytes) -> str:
     try:
-        import pdfplumber, io
+        import pdfplumber
         with pdfplumber.open(io.BytesIO(data)) as pdf:
-            pages = pdf.pages[:20]
-            texts = [p.extract_text() or '' for p in pages]
-        return '\n'.join(texts)[:6000]
+            texts = [p.extract_text() or '' for p in pdf.pages[:25]]
+        return '\n'.join(texts)[:8000]
     except Exception as e:
         return f'[PDF解析失败: {e}]'
 
 def extract_docx(data: bytes) -> str:
     try:
         from docx import Document
-        import io
         doc = Document(io.BytesIO(data))
-        return '\n'.join(p.text for p in doc.paragraphs if p.text.strip())[:6000]
+        return '\n'.join(p.text for p in doc.paragraphs if p.text.strip())[:8000]
     except Exception as e:
         return f'[Word解析失败: {e}]'
 
-def extract_html(data: bytes) -> str:
+def extract_html_bytes(data: bytes) -> str:
     try:
         from bs4 import BeautifulSoup
         soup = BeautifulSoup(data, 'html.parser')
         for tag in soup(['script','style','head']):
             tag.decompose()
-        return soup.get_text(separator='\n', strip=True)[:6000]
+        return soup.get_text(separator='\n', strip=True)[:8000]
     except Exception as e:
         return f'[HTML解析失败: {e}]'
 
-def image_to_b64(data: bytes, ext: str) -> tuple[str, str]:
-    """Returns (base64_str, media_type)"""
+def fetch_url(url: str) -> str:
+    try:
+        req = Request(url, headers={'User-Agent':'Mozilla/5.0'})
+        with urlopen(req, timeout=10) as r:
+            raw = r.read()
+        ct = r.headers.get('Content-Type','')
+        if 'html' in ct:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(raw, 'html.parser')
+            for tag in soup(['script','style','head','nav','footer']):
+                tag.decompose()
+            return soup.get_text(separator='\n', strip=True)[:5000]
+        return raw.decode('utf-8','ignore')[:5000]
+    except Exception as e:
+        return f'[链接无法访问: {e}]'
+
+def image_to_b64(data: bytes, ext: str):
     try:
         from PIL import Image
-        import io
         img = Image.open(io.BytesIO(data))
         if img.mode not in ('RGB','RGBA'):
             img = img.convert('RGB')
-        # Resize if too large
         max_px = 1568
         if max(img.width, img.height) > max_px:
             ratio = max_px / max(img.width, img.height)
@@ -149,53 +161,39 @@ def image_to_b64(data: bytes, ext: str) -> tuple[str, str]:
         mt = 'image/jpeg' if fmt == 'JPEG' else 'image/png'
         return b64, mt
     except Exception:
-        b64 = base64.standard_b64encode(data).decode()
-        mt = f'image/{ext.lower()}'
-        return b64, mt
+        return base64.standard_b64encode(data).decode(), f'image/{ext.lower()}'
 
-def extract_video_frames(data: bytes, ext: str) -> list[tuple[str,str]]:
-    """Extract up to 4 frames from video, return list of (b64, media_type)"""
+def extract_video_frames(data: bytes, ext: str):
     frames = []
     try:
         with tempfile.NamedTemporaryFile(suffix=f'.{ext}', delete=False) as vf:
-            vf.write(data)
-            vpath = vf.name
+            vf.write(data); vpath = vf.name
         out_dir = tempfile.mkdtemp()
-        # Extract 4 frames evenly spread
-        cmd = [
-            'ffmpeg', '-i', vpath,
-            '-vf', 'select=\'not(mod(n\\,floor(nb_frames/4+1)))\'',
-            '-vsync', 'vfr',
-            '-frames:v', '4',
-            '-q:v', '3',
-            os.path.join(out_dir, 'frame%02d.jpg'),
-            '-y', '-loglevel', 'error'
-        ]
+        cmd = ['ffmpeg', '-i', vpath,
+               '-vf', "select='not(mod(n\\,floor(nb_frames/4+1)))'",
+               '-vsync','vfr','-frames:v','4','-q:v','3',
+               os.path.join(out_dir,'frame%02d.jpg'),
+               '-y','-loglevel','error']
         subprocess.run(cmd, timeout=30, check=True)
         for fname in sorted(os.listdir(out_dir)):
             if fname.endswith('.jpg'):
-                with open(os.path.join(out_dir, fname), 'rb') as f:
-                    raw = f.read()
-                b64 = base64.standard_b64encode(raw).decode()
-                frames.append((b64, 'image/jpeg'))
+                with open(os.path.join(out_dir,fname),'rb') as f:
+                    b64 = base64.standard_b64encode(f.read()).decode()
+                frames.append((b64,'image/jpeg'))
         os.unlink(vpath)
     except Exception:
         pass
     return frames
 
-
-def describe_with_vision(client, frames: list[tuple[str,str]], context_note: str) -> str:
-    """Ask Claude to describe the visual content"""
+def describe_with_vision(client, frames, context_note: str) -> str:
     content = [{"type":"text","text":
         f"以下是员工AI作品的截图/画面。员工简要说明：「{context_note}」\n"
-        "请详细描述画面中展示的AI应用内容、功能、界面、操作流程等，"
-        "用于后续的AI评审打分。请用中文回答，200字以内。"}]
+        "请详细描述画面中展示的AI应用内容、功能、界面、操作流程等，用于后续AI评审打分。中文，200字以内。"}]
     for b64, mt in frames[:4]:
         content.append({"type":"image","source":{"type":"base64","media_type":mt,"data":b64}})
     try:
         msg = client.messages.create(
-            model='claude-opus-4-6',
-            max_tokens=512,
+            model='claude-opus-4-6', max_tokens=512,
             messages=[{"role":"user","content":content}]
         )
         return msg.content[0].text.strip()
@@ -203,47 +201,46 @@ def describe_with_vision(client, frames: list[tuple[str,str]], context_note: str
         return f'[视觉分析失败: {e}]'
 
 
-def process_submission_file(sub: dict, client) -> str:
-    """Process file from a submission dict, return descriptive text for prompt"""
-    file_data = sub.get('file_data')
-    file_ext  = (sub.get('file_ext') or '').lower()
-    file_name = sub.get('file_name') or ''
-    note      = sub.get('note') or ''
+def process_submission(sub: dict, files: list, client) -> str:
+    """Build full content string for a submission (all files + links)"""
+    note  = sub.get('note','')
+    links = json.loads(sub.get('links') or '[]')
+    parts = []
 
-    if not file_data or not file_ext:
-        return '（未上传文件）'
+    # Process each file
+    for frow in files:
+        fname = frow['file_name']
+        ext   = frow['file_ext'].lower()
+        data  = bytes(frow['file_data'])
+        cat   = file_cat(ext)
+        parts.append(f'── 文件：{fname} ──')
+        if cat == 'pdf':
+            parts.append(extract_pdf(data))
+        elif cat == 'word':
+            parts.append(extract_docx(data))
+        elif cat == 'html':
+            parts.append(extract_html_bytes(data))
+        elif cat == 'image':
+            b64, mt = image_to_b64(data, ext)
+            desc = describe_with_vision(client, [(b64,mt)], note)
+            parts.append(f'[图片内容] {desc}')
+        elif cat == 'video':
+            frames = extract_video_frames(data, ext)
+            if frames:
+                desc = describe_with_vision(client, frames, note)
+                parts.append(f'[视频内容] {desc}')
+            else:
+                parts.append('[视频文件（无法提取帧）]')
 
-    cat = file_cat(file_ext)
-    result = f'【附件文件名】{file_name}\n'
+    # Fetch each URL
+    for url in links:
+        url = url.strip()
+        if not url:
+            continue
+        parts.append(f'── 链接：{url} ──')
+        parts.append(fetch_url(url))
 
-    if cat == 'pdf':
-        text = extract_pdf(file_data)
-        result += f'【PDF文件内容】\n{text}'
-
-    elif cat == 'word':
-        text = extract_docx(file_data)
-        result += f'【Word文档内容】\n{text}'
-
-    elif cat == 'html':
-        text = extract_html(file_data)
-        result += f'【HTML页面文字内容】\n{text}'
-
-    elif cat == 'image':
-        b64, mt = image_to_b64(file_data, file_ext)
-        desc = describe_with_vision(client, [(b64, mt)], note)
-        result += f'【图片内容描述（AI视觉分析）】\n{desc}'
-
-    elif cat == 'video':
-        frames = extract_video_frames(file_data, file_ext)
-        if frames:
-            desc = describe_with_vision(client, frames, note)
-            result += f'【视频关键帧内容描述（AI视觉分析）】\n{desc}'
-        else:
-            result += '【视频文件（无法提取帧，可能环境缺少ffmpeg）】'
-    else:
-        result += '【不支持的文件类型】'
-
-    return result
+    return '\n\n'.join(parts) if parts else '（未上传文件或链接）'
 
 
 # ── AI Evaluation ──────────────────────────────────────────────────────────────
@@ -256,22 +253,25 @@ COMPANY_CONTEXT = """
 - 操作员培训与安全合规
 - 零配件供应
 
-员工日常工作涵盖：客户询价与报价、设备调度与合同管理、维修工单处理、
-库存盘点、安全巡检、驾照证书管理、财务开票、客服沟通等。
+员工日常工作：客户询价报价、设备调度合同管理、维修工单处理、库存盘点、安全巡检、财务开票、客服沟通等。
 """
 
-def build_eval_prompt(subs_with_content: list[dict]) -> str:
+def build_eval_prompt(subs_with_content: list) -> str:
     block = ''
     for i, s in enumerate(subs_with_content, 1):
+        links = json.loads(s.get('links') or '[]')
+        file_count = s.get('file_count', 0)
         block += f"""
-{'='*55}
+{'='*60}
 【参赛作品 {i}】
 员工姓名：{s['name']}
 部门：{s['department'] or '未填写'}
 简要说明：{s['note'] or '（未填写）'}
+附件数量：{file_count} 个文件  |  链接数量：{len(links)} 个
 提交时间：{s['created_at']}
 
-{s.get('file_content','（无附件）')}
+【作品内容详情】
+{s.get('content','（无内容）')}
 """
     return f"""你是专业公正的AI创新评审专家，正在评选本月"最佳AI创新应用奖"。
 
@@ -283,17 +283,17 @@ def build_eval_prompt(subs_with_content: list[dict]) -> str:
 3. 学习深度（25分）：对AI工具/技术的理解掌握程度，学习的系统性
 4. 影响力（25分）：惠及人数、业务范围、推广价值与潜在效益
 
-【要求】
+【评审要求】
 - 结合叉车业务背景评分，重点看对业务的实际帮助
-- 评分有区分度，不要集中在同一分数
-- 每人写60-100字综合点评
+- 评分要有区分度，不要所有人得分接近
+- 每人写一段100-150字的综合评语，要具体、有针对性，指出亮点和可改进之处
 - 总分 = 四项之和，按总分降序排列
 - 严格输出纯JSON，无其他文字
 
 参赛作品：
 {block}
 
-输出格式（JSON数组，降序）：
+输出格式（JSON数组，按总分降序）：
 [
   {{
     "name": "姓名",
@@ -302,7 +302,8 @@ def build_eval_prompt(subs_with_content: list[dict]) -> str:
     "learning_depth": 分数,
     "impact": 分数,
     "total": 合计,
-    "comment": "点评"
+    "highlights": "亮点（1句话）",
+    "comment": "100-150字综合评语，具体指出作品特点、优势及改进建议"
   }}
 ]"""
 
@@ -314,20 +315,20 @@ def build_eval_prompt(subs_with_content: list[dict]) -> str:
 BASE_STYLE = """
 <style>
   :root {
-    --p:#6366f1; --pd:#4f46e5; --pl:#ede9fe;
-    --g:#10b981; --r:#ef4444; --y:#f59e0b;
-    --bg:#f1f5f9; --card:#fff;
-    --t1:#1e293b; --t2:#475569; --t3:#94a3b8;
+    --p:#6366f1;--pd:#4f46e5;--pl:#ede9fe;
+    --g:#10b981;--r:#ef4444;--y:#f59e0b;
+    --bg:#f1f5f9;--card:#fff;
+    --t1:#1e293b;--t2:#475569;--t3:#94a3b8;
     --bd:#e2e8f0;
-    --sh:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.05);
+    --sh:0 1px 3px rgba(0,0,0,.08);
     --shm:0 4px 8px rgba(0,0,0,.07),0 2px 4px rgba(0,0,0,.04);
     --shl:0 12px 24px rgba(0,0,0,.08),0 4px 8px rgba(0,0,0,.04);
   }
   *{margin:0;padding:0;box-sizing:border-box;}
-  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC',
-       'Microsoft YaHei',sans-serif;background:var(--bg);color:var(--t1);min-height:100vh;}
-  input,textarea,select{width:100%;padding:10px 13px;border:1.5px solid var(--bd);
-    border-radius:9px;font-size:14px;font-family:inherit;color:var(--t1);background:#fff;
+  body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','PingFang SC','Microsoft YaHei',sans-serif;
+       background:var(--bg);color:var(--t1);min-height:100vh;}
+  input,textarea{width:100%;padding:10px 13px;border:1.5px solid var(--bd);border-radius:9px;
+    font-size:14px;font-family:inherit;color:var(--t1);background:#fff;
     transition:border-color .15s,box-shadow .15s;outline:none;}
   input:focus,textarea:focus{border-color:var(--p);box-shadow:0 0 0 3px rgba(99,102,241,.1);}
   textarea{resize:vertical;line-height:1.6;}
@@ -335,7 +336,7 @@ BASE_STYLE = """
        cursor:pointer;transition:all .18s;display:inline-flex;align-items:center;
        justify-content:center;gap:6px;font-family:inherit;text-decoration:none;}
   .btn-p{background:var(--p);color:#fff;}
-  .btn-p:hover{background:var(--pd);transform:translateY(-1px);box-shadow:var(--shm);}
+  .btn-p:hover{background:var(--pd);transform:translateY(-1px);}
   .btn-d{background:#fee2e2;color:var(--r);}
   .btn-d:hover{background:var(--r);color:#fff;}
   .btn-g{background:linear-gradient(135deg,#4f46e5,#7c3aed);color:#fff;
@@ -343,17 +344,16 @@ BASE_STYLE = """
   .btn-g:hover{transform:translateY(-2px);box-shadow:0 8px 24px rgba(99,102,241,.38);}
   .btn:disabled{opacity:.45;cursor:not-allowed;transform:none!important;box-shadow:none!important;}
   .btn-w{width:100%;}
-  .card{background:var(--card);border-radius:16px;box-shadow:var(--shm);overflow:hidden;}
   .fg{margin-bottom:16px;}
   .lbl{display:block;font-size:12px;font-weight:600;color:var(--t2);
        text-transform:uppercase;letter-spacing:.6px;margin-bottom:6px;}
-  .req{color:var(--r);margin-left:2px;}
+  .req{color:var(--r);}
   .hint{font-size:12px;color:var(--t3);margin-top:5px;line-height:1.5;}
   .toast{position:fixed;bottom:24px;right:24px;padding:12px 18px;border-radius:10px;
          color:#fff;font-size:13px;font-weight:500;transform:translateY(70px);opacity:0;
          transition:all .28s;z-index:2000;box-shadow:var(--shl);max-width:320px;}
   .toast.show{transform:translateY(0);opacity:1;}
-  .toast.ok{background:var(--g);} .toast.err{background:var(--r);}
+  .toast.ok{background:var(--g);}.toast.err{background:var(--r);}
 </style>
 """
 
@@ -362,179 +362,219 @@ SUBMIT_HTML = BASE_STYLE + r"""
 <style>
   .hero{background:linear-gradient(135deg,#4338ca 0%,#7c3aed 55%,#a855f7 100%);
         padding:40px 24px;text-align:center;color:#fff;}
-  .hero .badge{display:inline-block;background:rgba(255,255,255,.2);
-               border-radius:999px;padding:5px 16px;font-size:13px;
-               font-weight:600;margin-bottom:14px;backdrop-filter:blur(8px);}
-  .hero h1{font-size:26px;font-weight:800;letter-spacing:-.3px;margin-bottom:8px;}
+  .hero .badge{display:inline-block;background:rgba(255,255,255,.2);border-radius:999px;
+               padding:5px 16px;font-size:13px;font-weight:600;margin-bottom:14px;}
+  .hero h1{font-size:26px;font-weight:800;margin-bottom:8px;}
   .hero p{font-size:14px;opacity:.82;max-width:480px;margin:0 auto;line-height:1.7;}
-  .wrap{max-width:620px;margin:0 auto;padding:28px 20px 60px;}
-  .section-title{font-size:13px;font-weight:700;color:var(--p);
-                 text-transform:uppercase;letter-spacing:.8px;
-                 margin:24px 0 14px;padding-bottom:8px;
-                 border-bottom:2px solid var(--pl);}
+  .wrap{max-width:640px;margin:0 auto;padding:28px 20px 60px;}
+  .sec{font-size:13px;font-weight:700;color:var(--p);text-transform:uppercase;letter-spacing:.8px;
+       margin:24px 0 14px;padding-bottom:8px;border-bottom:2px solid var(--pl);}
 
-  /* Drag-drop zone */
-  .drop-zone{border:2px dashed var(--bd);border-radius:12px;
-             background:#fafbff;padding:32px 20px;text-align:center;
-             cursor:pointer;transition:all .2s;position:relative;}
+  /* Multi-file drop zone */
+  .drop-zone{border:2px dashed var(--bd);border-radius:12px;background:#fafbff;
+             padding:28px 20px;text-align:center;cursor:pointer;transition:all .2s;position:relative;}
   .drop-zone:hover,.drop-zone.over{border-color:var(--p);background:var(--pl);}
-  .drop-zone .dz-icon{font-size:40px;margin-bottom:10px;}
-  .drop-zone .dz-title{font-size:15px;font-weight:600;color:var(--t1);margin-bottom:4px;}
-  .drop-zone .dz-sub{font-size:12px;color:var(--t3);line-height:1.6;}
+  .dz-icon{font-size:36px;margin-bottom:8px;}
+  .dz-title{font-size:15px;font-weight:600;margin-bottom:4px;}
+  .dz-sub{font-size:12px;color:var(--t3);line-height:1.6;}
   .drop-zone input[type=file]{position:absolute;inset:0;opacity:0;cursor:pointer;width:100%;height:100%;}
-  .file-preview{display:none;align-items:center;gap:12px;
-                background:#f0f9ff;border:1.5px solid #bae6fd;border-radius:10px;
-                padding:12px 16px;margin-top:10px;}
-  .file-preview .fp-icon{font-size:24px;}
-  .file-preview .fp-name{font-size:13px;font-weight:600;color:var(--t1);
-                          word-break:break-all;}
-  .file-preview .fp-size{font-size:11px;color:var(--t3);margin-top:2px;}
-  .file-preview .fp-rm{margin-left:auto;cursor:pointer;color:var(--r);
-                        font-size:20px;flex-shrink:0;background:none;border:none;}
+
+  /* File list */
+  .file-list{margin-top:10px;display:flex;flex-direction:column;gap:6px;}
+  .file-item{display:flex;align-items:center;gap:10px;background:#f0f9ff;
+             border:1.5px solid #bae6fd;border-radius:8px;padding:8px 12px;}
+  .fi-icon{font-size:20px;flex-shrink:0;}
+  .fi-info{flex:1;min-width:0;}
+  .fi-name{font-size:13px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+  .fi-size{font-size:11px;color:var(--t3);}
+  .fi-rm{background:none;border:none;cursor:pointer;color:var(--r);font-size:18px;padding:2px 6px;flex-shrink:0;}
+
+  /* URL inputs */
+  .url-list{display:flex;flex-direction:column;gap:8px;}
+  .url-row{display:flex;gap:6px;align-items:center;}
+  .url-row input{flex:1;}
+  .url-rm{background:none;border:none;cursor:pointer;color:var(--r);font-size:18px;padding:4px 8px;flex-shrink:0;}
+  .add-url-btn{background:var(--pl);color:var(--p);border:1.5px dashed var(--p);
+               border-radius:8px;padding:8px 14px;font-size:13px;font-weight:600;
+               cursor:pointer;width:100%;margin-top:6px;transition:all .15s;}
+  .add-url-btn:hover{background:var(--p);color:#fff;}
 
   .char-count{text-align:right;font-size:11px;color:var(--t3);margin-top:4px;}
   .submit-btn{padding:14px;font-size:16px;border-radius:12px;margin-top:8px;}
   .footer{text-align:center;font-size:12px;color:var(--t3);margin-top:32px;}
   .info-box{background:linear-gradient(135deg,#f0fdf4,#ecfdf5);border:1px solid #86efac;
-            border-radius:12px;padding:14px 18px;margin-bottom:20px;
-            font-size:13px;color:#166534;line-height:1.7;}
+            border-radius:12px;padding:14px 18px;margin-bottom:20px;font-size:13px;color:#166534;line-height:1.7;}
 </style>
 
 <div class="hero">
   <div class="badge">🏆 {{ month }} · 月度AI创新大奖</div>
   <h1>提交你的AI创新作品</h1>
-  <p>上传你的AI作品文件，加上一句简要说明，即可参与评选 🚀</p>
+  <p>上传作品文件和链接，加上简要说明，即可参与本月评选 🚀</p>
 </div>
 
 <div class="wrap">
-  {% if success %}
+{% if success %}
   <div style="text-align:center;padding:48px 20px">
     <div style="font-size:64px;margin-bottom:16px">🎉</div>
     <h2 style="font-size:22px;margin-bottom:10px">提交成功！</h2>
     <p style="color:var(--t2);font-size:14px;line-height:1.8;max-width:360px;margin:0 auto">
       感谢 <strong>{{ submitted_name }}</strong> 的参与！<br>
-      {% if submitted_file %}已收到文件：{{ submitted_file }}<br>{% endif %}
-      评审结果将由管理员公布。加油！💪
+      {% if file_count %}上传了 {{ file_count }} 个文件{% endif %}
+      {% if link_count %}{% if file_count %}，{% endif %}{{ link_count }} 个链接{% endif %}<br>
+      评审结果将由管理员公布，加油！💪
     </p>
     <a href="/" class="btn btn-p" style="margin-top:28px;display:inline-flex">再提交一份</a>
   </div>
-  {% else %}
+{% else %}
 
-  {% if error %}
-  <div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;
-              padding:12px 16px;margin-bottom:20px;font-size:13px;color:#991b1b">
-    ⚠️ {{ error }}
-  </div>
-  {% endif %}
+{% if error %}
+<div style="background:#fef2f2;border:1px solid #fca5a5;border-radius:10px;
+            padding:12px 16px;margin-bottom:20px;font-size:13px;color:#991b1b">
+  ⚠️ {{ error }}
+</div>
+{% endif %}
 
-  <div class="info-box">
-    📋 评审从四个维度打分（各25分）：
-    💡 <strong>创新性</strong> · ⚙️ <strong>实用性</strong> ·
-    📚 <strong>学习深度</strong> · 🌟 <strong>影响力</strong>
-  </div>
+<div class="info-box">
+  📋 评审从四个维度打分（各25分，共100分）：<br>
+  💡 <strong>创新性</strong> · ⚙️ <strong>实用性</strong> · 📚 <strong>学习深度</strong> · 🌟 <strong>影响力</strong>
+</div>
 
-  <form method="POST" action="/" enctype="multipart/form-data" id="subForm">
+<form method="POST" action="/" enctype="multipart/form-data" id="subForm">
 
-    <div class="section-title">👤 基本信息</div>
-    <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
-      <div class="fg">
-        <label class="lbl">姓名 <span class="req">*</span></label>
-        <input type="text" name="name" placeholder="你的姓名" required maxlength="50">
-      </div>
-      <div class="fg">
-        <label class="lbl">部门（可选）</label>
-        <input type="text" name="department" placeholder="如：销售部、运维部" maxlength="50">
-      </div>
-    </div>
-
-    <div class="section-title">💬 简要说明</div>
+  <div class="sec">👤 基本信息</div>
+  <div style="display:grid;grid-template-columns:1fr 1fr;gap:14px">
     <div class="fg">
-      <textarea name="note" rows="3" maxlength="500"
-        placeholder="用1-3句话描述你的AI作品：用了什么AI工具、解决了什么问题、有什么效果？"
-        required oninput="updateCount(this,'note-count')"></textarea>
-      <div class="char-count"><span id="note-count">0</span> / 500</div>
+      <label class="lbl">姓名 <span class="req">*</span></label>
+      <input type="text" name="name" placeholder="你的姓名" required maxlength="50">
     </div>
-
-    <div class="section-title">📎 上传作品文件</div>
     <div class="fg">
-      <div class="drop-zone" id="dropZone">
-        <input type="file" name="file" id="fileInput" accept=".pdf,.doc,.docx,.html,.htm,.jpg,.jpeg,.png,.gif,.webp,.bmp,.mp4,.mov,.avi,.mkv,.webm,.m4v">
-        <div class="dz-icon" id="dzIcon">📂</div>
-        <div class="dz-title" id="dzTitle">点击选择文件，或拖放到此处</div>
-        <div class="dz-sub" id="dzSub">
-          支持：PDF · Word · HTML · 图片（JPG/PNG等） · 视频（MP4/MOV等）<br>
-          文件大小限制：100 MB
-        </div>
-      </div>
-      <div class="file-preview" id="filePreview">
-        <span class="fp-icon" id="fpIcon">📄</span>
-        <div>
-          <div class="fp-name" id="fpName"></div>
-          <div class="fp-size" id="fpSize"></div>
-        </div>
-        <button type="button" class="fp-rm" onclick="clearFile()" title="移除文件">✕</button>
+      <label class="lbl">部门（可选）</label>
+      <input type="text" name="department" placeholder="如：销售部、运维部" maxlength="50">
+    </div>
+  </div>
+
+  <div class="sec">💬 简要说明</div>
+  <div class="fg">
+    <textarea name="note" rows="3" maxlength="600" required
+      placeholder="用2-4句话描述：用了什么AI工具、解决了什么问题、达到了什么效果？"
+      oninput="updateCount(this,'nc')"></textarea>
+    <div class="char-count"><span id="nc">0</span> / 600</div>
+  </div>
+
+  <div class="sec">📎 上传文件（可多选）</div>
+  <div class="fg">
+    <div class="drop-zone" id="dropZone">
+      <input type="file" name="files" id="fileInput" multiple
+             accept=".pdf,.doc,.docx,.html,.htm,.jpg,.jpeg,.png,.gif,.webp,.bmp,.mp4,.mov,.avi,.mkv,.webm,.m4v">
+      <div class="dz-icon">📂</div>
+      <div class="dz-title">点击选择文件，或将文件拖放到此处</div>
+      <div class="dz-sub">
+        支持：PDF · Word · HTML · 图片（JPG/PNG等）· 视频（MP4/MOV等）<br>
+        可同时选多个文件 · 单次总大小限制 200MB
       </div>
     </div>
+    <div class="file-list" id="fileList"></div>
+  </div>
 
-    <button type="submit" class="btn btn-g btn-w submit-btn" id="submitBtn">
-      🚀 提交作品
-    </button>
-  </form>
+  <div class="sec">🔗 相关链接（可选）</div>
+  <div class="fg">
+    <p class="hint" style="margin-bottom:10px">如有演示视频、在线工具、Google Drive 文档等，可在此添加链接</p>
+    <div class="url-list" id="urlList">
+      <div class="url-row">
+        <input type="url" name="links" placeholder="https://..." class="url-input">
+        <button type="button" class="url-rm" onclick="removeUrl(this)" title="删除">✕</button>
+      </div>
+    </div>
+    <button type="button" class="add-url-btn" onclick="addUrl()">＋ 添加更多链接</button>
+  </div>
 
-  <div class="footer">提交内容仅用于内部AI创新评审 · 如有问题请联系管理员</div>
-  {% endif %}
+  <button type="submit" class="btn btn-g btn-w submit-btn" id="submitBtn">
+    🚀 提交作品
+  </button>
+</form>
+
+<div class="footer">提交内容仅用于内部AI创新评审 · 如有问题请联系管理员</div>
+{% endif %}
 </div>
 
 <script>
-function updateCount(el, id){ document.getElementById(id).textContent = el.value.length; }
+const EXT_ICONS={pdf:'📕',doc:'📘',docx:'📘',html:'🌐',htm:'🌐',
+  jpg:'🖼️',jpeg:'🖼️',png:'🖼️',gif:'🖼️',webp:'🖼️',bmp:'🖼️',
+  mp4:'🎬',mov:'🎬',avi:'🎬',mkv:'🎬',webm:'🎬',m4v:'🎬'};
 
-const EXT_ICONS = {
-  pdf:'📕', doc:'📘', docx:'📘', html:'🌐', htm:'🌐',
-  jpg:'🖼️', jpeg:'🖼️', png:'🖼️', gif:'🖼️', webp:'🖼️', bmp:'🖼️',
-  mp4:'🎬', mov:'🎬', avi:'🎬', mkv:'🎬', webm:'🎬', m4v:'🎬',
-};
+function fmtSize(b){
+  if(b<1024)return b+'B';
+  if(b<1048576)return (b/1024).toFixed(1)+'KB';
+  return (b/1048576).toFixed(1)+'MB';
+}
+function updateCount(el,id){document.getElementById(id).textContent=el.value.length;}
 
-function fmtSize(bytes){
-  if(bytes<1024) return bytes+'B';
-  if(bytes<1048576) return (bytes/1024).toFixed(1)+'KB';
-  return (bytes/1048576).toFixed(1)+'MB';
+let selectedFiles=[];
+
+const fi=document.getElementById('fileInput');
+const dz=document.getElementById('dropZone');
+const fl=document.getElementById('fileList');
+
+function renderFiles(){
+  fl.innerHTML='';
+  selectedFiles.forEach((f,i)=>{
+    const ext=f.name.split('.').pop().toLowerCase();
+    const div=document.createElement('div');
+    div.className='file-item';
+    div.innerHTML=`<span class="fi-icon">${EXT_ICONS[ext]||'📄'}</span>
+      <div class="fi-info"><div class="fi-name">${f.name}</div><div class="fi-size">${fmtSize(f.size)}</div></div>
+      <button type="button" class="fi-rm" onclick="removeFile(${i})">✕</button>`;
+    fl.appendChild(div);
+  });
 }
 
-const fi = document.getElementById('fileInput');
-const dz = document.getElementById('dropZone');
-const fp = document.getElementById('filePreview');
+function removeFile(idx){
+  selectedFiles.splice(idx,1);
+  updateFileInput();
+  renderFiles();
+}
 
-fi.addEventListener('change', ()=>{ if(fi.files[0]) showFile(fi.files[0]); });
+function updateFileInput(){
+  const dt=new DataTransfer();
+  selectedFiles.forEach(f=>dt.items.add(f));
+  fi.files=dt.files;
+}
 
-dz.addEventListener('dragover', e=>{ e.preventDefault(); dz.classList.add('over'); });
-dz.addEventListener('dragleave', ()=> dz.classList.remove('over'));
-dz.addEventListener('drop', e=>{
-  e.preventDefault(); dz.classList.remove('over');
-  const f = e.dataTransfer.files[0];
-  if(f){ fi.files = e.dataTransfer.files; showFile(f); }
+fi.addEventListener('change',()=>{
+  Array.from(fi.files).forEach(f=>{
+    if(!selectedFiles.find(x=>x.name===f.name&&x.size===f.size))
+      selectedFiles.push(f);
+  });
+  updateFileInput();renderFiles();
 });
 
-function showFile(f){
-  const ext = f.name.split('.').pop().toLowerCase();
-  document.getElementById('fpIcon').textContent = EXT_ICONS[ext] || '📄';
-  document.getElementById('fpName').textContent = f.name;
-  document.getElementById('fpSize').textContent = fmtSize(f.size);
-  fp.style.display = 'flex';
-  document.getElementById('dzTitle').textContent = '已选择文件（点击更换）';
-  document.getElementById('dzSub').style.display = 'none';
+dz.addEventListener('dragover',e=>{e.preventDefault();dz.classList.add('over');});
+dz.addEventListener('dragleave',()=>dz.classList.remove('over'));
+dz.addEventListener('drop',e=>{
+  e.preventDefault();dz.classList.remove('over');
+  Array.from(e.dataTransfer.files).forEach(f=>{
+    if(!selectedFiles.find(x=>x.name===f.name&&x.size===f.size))
+      selectedFiles.push(f);
+  });
+  updateFileInput();renderFiles();
+});
+
+function addUrl(){
+  const row=document.createElement('div');
+  row.className='url-row';
+  row.innerHTML=`<input type="url" name="links" placeholder="https://..." class="url-input">
+    <button type="button" class="url-rm" onclick="removeUrl(this)">✕</button>`;
+  document.getElementById('urlList').appendChild(row);
+}
+function removeUrl(btn){
+  const rows=document.querySelectorAll('.url-row');
+  if(rows.length>1) btn.closest('.url-row').remove();
+  else btn.closest('.url-row').querySelector('input').value='';
 }
 
-function clearFile(){
-  fi.value = '';
-  fp.style.display = 'none';
-  document.getElementById('dzTitle').textContent = '点击选择文件，或拖放到此处';
-  document.getElementById('dzSub').style.display = '';
-}
-
-document.getElementById('subForm')?.addEventListener('submit', function(){
-  const btn = document.getElementById('submitBtn');
-  btn.disabled = true;
-  btn.textContent = '⏳ 提交中…';
+document.getElementById('subForm')?.addEventListener('submit',function(){
+  const btn=document.getElementById('submitBtn');
+  btn.disabled=true;btn.textContent='⏳ 提交中…';
 });
 </script>
 """
@@ -557,7 +597,7 @@ LOGIN_HTML = BASE_STYLE + """
     <h1>管理员登录</h1>
     <p>AI创新评审系统 · 后台管理</p>
   </div>
-  <div class="card" style="padding:28px">
+  <div style="background:#fff;border-radius:16px;box-shadow:var(--shm);padding:28px">
     {% if error %}<div class="err">{{ error }}</div>{% endif %}
     <form method="POST" action="/admin">
       <div class="fg">
@@ -574,20 +614,17 @@ LOGIN_HTML = BASE_STYLE + """
 DASHBOARD_HTML = BASE_STYLE + r"""
 <style>
   .topbar{background:linear-gradient(135deg,#4338ca,#7c3aed);color:#fff;
-          padding:0;position:sticky;top:0;z-index:100;box-shadow:var(--shm);}
-  .topbar-in{max-width:1100px;margin:0 auto;padding:14px 28px;
-             display:flex;align-items:center;gap:12px;}
+          position:sticky;top:0;z-index:100;box-shadow:var(--shm);}
+  .topbar-in{max-width:1100px;margin:0 auto;padding:14px 28px;display:flex;align-items:center;gap:12px;}
   .topbar h1{font-size:17px;font-weight:700;}
   .topbar p{font-size:12px;opacity:.75;margin-top:1px;}
   .topbar-actions{margin-left:auto;display:flex;gap:8px;align-items:center;}
-  .pill{background:rgba(255,255,255,.2);border-radius:999px;padding:4px 12px;
-        font-size:12px;font-weight:600;backdrop-filter:blur(8px);}
+  .pill{background:rgba(255,255,255,.2);border-radius:999px;padding:4px 12px;font-size:12px;font-weight:600;}
   .wrap{max-width:1100px;margin:0 auto;padding:28px;}
 
   .month-tabs{display:flex;gap:6px;margin-bottom:22px;flex-wrap:wrap;}
-  .mtab{padding:7px 18px;border-radius:999px;border:1.5px solid var(--bd);
-        background:#fff;font-size:13px;font-weight:500;cursor:pointer;
-        transition:all .15s;color:var(--t2);}
+  .mtab{padding:7px 18px;border-radius:999px;border:1.5px solid var(--bd);background:#fff;
+        font-size:13px;font-weight:500;cursor:pointer;transition:all .15s;color:var(--t2);}
   .mtab.active{background:var(--p);color:#fff;border-color:var(--p);}
   .mtab:hover:not(.active){border-color:var(--p);color:var(--p);}
 
@@ -596,79 +633,75 @@ DASHBOARD_HTML = BASE_STYLE + r"""
   .stat .num{font-size:30px;font-weight:800;color:var(--p);line-height:1;}
   .stat .lbl{font-size:12px;color:var(--t2);margin-top:4px;}
 
-  .sub-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:14px;}
-  .sub-card{border:1.5px solid var(--bd);border-radius:12px;padding:16px 18px;
-            background:#fff;transition:border-color .15s,box-shadow .15s;}
+  .sub-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(310px,1fr));gap:14px;}
+  .sub-card{border:1.5px solid var(--bd);border-radius:12px;padding:16px 18px;background:#fff;}
   .sub-card:hover{border-color:var(--p);box-shadow:0 0 0 3px rgba(99,102,241,.07);}
   .sub-top{display:flex;align-items:flex-start;gap:10px;margin-bottom:10px;}
   .av{width:40px;height:40px;border-radius:10px;
       background:linear-gradient(135deg,#6366f1,#a855f7);
-      display:flex;align-items:center;justify-content:center;
-      color:#fff;font-weight:700;font-size:16px;flex-shrink:0;}
+      display:flex;align-items:center;justify-content:center;color:#fff;font-weight:700;font-size:16px;flex-shrink:0;}
   .sub-name{font-weight:700;font-size:15px;}
-  .tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;display:inline-block;margin-top:4px;}
+  .tag{font-size:11px;font-weight:600;padding:2px 8px;border-radius:999px;display:inline-block;margin-top:4px;margin-right:4px;}
   .tag-dept{background:var(--pl);color:var(--p);}
   .tag-file{background:#f0f9ff;color:#0369a1;}
-  .sub-note{font-size:13px;color:var(--t2);line-height:1.6;
-            display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;
-            margin-top:8px;}
+  .tag-link{background:#f0fdf4;color:#166534;}
+  .sub-note{font-size:13px;color:var(--t2);line-height:1.6;margin-top:8px;
+            display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;}
   .sub-meta{font-size:11px;color:var(--t3);margin-top:8px;}
-  .sub-foot{display:flex;align-items:center;justify-content:flex-end;gap:6px;
+  .sub-foot{display:flex;align-items:center;flex-wrap:wrap;gap:6px;
             margin-top:12px;padding-top:10px;border-top:1px solid var(--bd);}
 
-  .eval-box{background:#fff;border-radius:16px;padding:24px 28px;
-            margin-bottom:24px;box-shadow:var(--sh);border:1.5px solid var(--bd);}
+  /* Eval box */
+  .eval-box{background:#fff;border-radius:16px;padding:24px 28px;margin-bottom:24px;
+            box-shadow:var(--sh);border:1.5px solid var(--bd);}
   .eval-box h3{font-size:16px;font-weight:700;margin-bottom:6px;}
   .eval-box p{font-size:13px;color:var(--t2);margin-bottom:16px;line-height:1.6;}
   .eval-row{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;}
   .api-wrap{flex:1;min-width:240px;}
   .api-wrap label{font-size:11px;font-weight:600;color:var(--t2);
                   text-transform:uppercase;letter-spacing:.5px;display:block;margin-bottom:6px;}
+  .no-api-warn{background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;
+               padding:12px 16px;font-size:13px;color:#9a3412;margin-bottom:16px;}
 
-  .results-wrap{margin-top:28px;}
-  .res-card{border:1.5px solid var(--bd);border-radius:14px;overflow:hidden;
-            margin-bottom:14px;transition:transform .2s,box-shadow .2s;}
-  .res-card:hover{transform:translateY(-2px);box-shadow:var(--shl);}
+  /* Results */
+  .res-card{border:1.5px solid var(--bd);border-radius:16px;overflow:hidden;margin-bottom:16px;}
   .res-card.r1{border-color:#f59e0b;} .res-card.r2{border-color:#9ca3af;}
   .res-card.r3{border-color:#b45309;}
-  .res-hd{padding:13px 18px;background:#fafafa;display:flex;align-items:center;gap:11px;}
-  .medal{width:36px;height:36px;border-radius:9px;display:flex;align-items:center;
-         justify-content:center;font-size:20px;flex-shrink:0;}
+  .res-hd{padding:16px 20px;background:#fafafa;display:flex;align-items:center;gap:12px;}
+  .medal{width:40px;height:40px;border-radius:10px;display:flex;align-items:center;
+         justify-content:center;font-size:22px;flex-shrink:0;}
   .medal.r1{background:#fef3c7;} .medal.r2{background:#f3f4f6;}
-  .medal.r3{background:#fde68a;} .medal.rn{background:var(--pl);font-size:13px;font-weight:700;color:var(--p);}
-  .res-info{flex:1;min-width:0;}
-  .res-name{font-weight:700;font-size:15px;}
-  .res-proj{font-size:12px;color:var(--t2);margin-top:2px;}
-  .tot{text-align:right;flex-shrink:0;}
-  .tot-n{font-size:28px;font-weight:800;color:var(--p);line-height:1;}
+  .medal.r3{background:#fde68a;} .medal.rn{background:var(--pl);font-size:14px;font-weight:700;color:var(--p);}
+  .res-name{font-weight:700;font-size:16px;}
+  .res-highlight{font-size:12px;color:var(--t2);margin-top:3px;font-style:italic;}
+  .tot-n{font-size:32px;font-weight:800;color:var(--p);line-height:1;}
   .tot-of{font-size:11px;color:var(--t3);}
-  .res-bd{padding:14px 18px;}
-  .sc-grid{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px;}
-  .sc-row label{display:flex;justify-content:space-between;font-size:11px;
-                font-weight:600;color:var(--t2);margin-bottom:4px;}
-  .sc-row label span{color:var(--t1);}
-  .bar-bg{height:6px;background:#e2e8f0;border-radius:999px;overflow:hidden;}
+  .res-bd{padding:16px 20px;}
+  .sc-grid{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px;}
+  .sc-row label{display:flex;justify-content:space-between;font-size:11px;font-weight:600;
+                color:var(--t2);margin-bottom:5px;}
+  .sc-row label span{color:var(--t1);font-weight:700;}
+  .bar-bg{height:7px;background:#e2e8f0;border-radius:999px;overflow:hidden;}
   .bar-fill{height:100%;border-radius:999px;width:0%;
             background:linear-gradient(90deg,#6366f1,#a855f7);
             transition:width 1.2s cubic-bezier(.4,0,.2,1);}
-  .comment{background:#f8fafc;border-left:3px solid var(--p);
-           border-radius:0 7px 7px 0;padding:9px 13px;
-           font-size:12px;color:var(--t2);line-height:1.7;font-style:italic;}
+  .comment-box{background:#f8fafc;border-left:3px solid var(--p);border-radius:0 8px 8px 0;
+               padding:12px 16px;font-size:13px;color:var(--t2);line-height:1.8;}
+  .comment-label{font-size:11px;font-weight:700;color:var(--p);
+                 text-transform:uppercase;letter-spacing:.5px;margin-bottom:6px;}
 
   .overlay{position:fixed;inset:0;background:rgba(15,23,42,.55);backdrop-filter:blur(6px);
            display:none;align-items:center;justify-content:center;z-index:1000;}
   .overlay.show{display:flex;}
   .ov-box{background:#fff;border-radius:18px;padding:36px 44px;text-align:center;
-          box-shadow:0 24px 60px rgba(0,0,0,.2);max-width:340px;width:90%;}
-  .spinner{width:48px;height:48px;border:4px solid #e2e8f0;border-top-color:var(--p);
+          box-shadow:0 24px 60px rgba(0,0,0,.2);max-width:360px;width:90%;}
+  .spinner{width:50px;height:50px;border:4px solid #e2e8f0;border-top-color:var(--p);
            border-radius:50%;animation:spin .7s linear infinite;margin:0 auto 18px;}
   @keyframes spin{to{transform:rotate(360deg);}}
-  .ov-box h3{font-size:16px;margin-bottom:7px;}
-  .ov-box p{color:var(--t2);font-size:12px;line-height:1.7;}
+  .ov-steps{margin-top:14px;text-align:left;}
+  .ov-step{font-size:12px;color:var(--t3);padding:3px 0;}
+  .ov-step.active{color:var(--p);font-weight:600;}
   .empty{text-align:center;padding:48px;color:var(--t3);}
-  .empty .ei{font-size:44px;margin-bottom:12px;}
-  .no-api-warn{background:#fff7ed;border:1px solid #fed7aa;border-radius:10px;
-               padding:12px 16px;font-size:13px;color:#9a3412;margin-bottom:16px;}
 </style>
 
 <div class="topbar">
@@ -678,51 +711,38 @@ DASHBOARD_HTML = BASE_STYLE + r"""
       <p>澳大利亚叉车租赁与销售公司</p>
     </div>
     <div class="topbar-actions">
-      <span class="pill">{{ current_month }} 共 {{ total_count }} 份</span>
-      <a href="/submit-link" class="btn" style="background:rgba(255,255,255,.2);color:#fff;
-         font-size:12px;padding:7px 14px;text-decoration:none">🔗 员工提交链接</a>
-      <a href="/admin/logout" class="btn" style="background:rgba(255,255,255,.15);color:#fff;
-         font-size:12px;padding:7px 14px;text-decoration:none">退出</a>
+      <span class="pill">{{ current_month }} · {{ month_count }}份</span>
+      <a href="/submit-link" class="btn" style="background:rgba(255,255,255,.2);color:#fff;font-size:12px;padding:7px 14px">🔗 员工链接</a>
+      <a href="/admin/logout" class="btn" style="background:rgba(255,255,255,.15);color:#fff;font-size:12px;padding:7px 14px">退出</a>
     </div>
   </div>
 </div>
 
 <div class="wrap">
-  <div class="month-tabs" id="monthTabs">
+
+  <div class="month-tabs">
     {% for m in months %}
     <button class="mtab {% if m == current_month %}active{% endif %}"
-            onclick="window.location.href='/admin/dashboard?month='+encodeURIComponent('{{ m }}')">
+      onclick="window.location.href='/admin/dashboard?month='+encodeURIComponent('{{ m }}')">
       {{ m }}（{{ month_counts[m] }}份）
     </button>
     {% endfor %}
   </div>
 
   <div class="stats">
-    <div class="stat">
-      <div class="num">{{ month_count }}</div>
-      <div class="lbl">{{ current_month }} 参赛作品</div>
-    </div>
-    <div class="stat">
-      <div class="num">{{ total_count }}</div>
-      <div class="lbl">历史总作品数</div>
-    </div>
-    <div class="stat">
-      <div class="num">{{ eval_count }}</div>
-      <div class="lbl">历史评审次数</div>
-    </div>
+    <div class="stat"><div class="num">{{ month_count }}</div><div class="lbl">{{ current_month }} 参赛作品</div></div>
+    <div class="stat"><div class="num">{{ total_count }}</div><div class="lbl">历史总作品数</div></div>
+    <div class="stat"><div class="num">{{ eval_count }}</div><div class="lbl">历史评审次数</div></div>
   </div>
 
   <div class="eval-box">
-    <h3>🤖 AI智能评审</h3>
+    <h3>🤖 AI 智能评审</h3>
     <p>
-      点击下方按钮，Claude 将读取 <strong>{{ current_month }}</strong> 所有作品的文件内容，
-      进行综合评审排名（含文档解析、图片/视频视觉分析）。<br>
-      含图片/视频时评审时间约 1-2 分钟，请耐心等待。
+      Claude 将自动读取 <strong>{{ current_month }}</strong> 所有作品的文件内容和链接，
+      综合评分并生成详细评语。含图片/视频时约需 1-3 分钟。
     </p>
     {% if not api_key_set %}
-    <div class="no-api-warn">
-      ⚠️ 未检测到 ANTHROPIC_API_KEY，请在下方手动输入
-    </div>
+    <div class="no-api-warn">⚠️ 未检测到 ANTHROPIC_API_KEY，请在下方手动输入</div>
     {% endif %}
     <div class="eval-row">
       {% if not api_key_set %}
@@ -739,13 +759,12 @@ DASHBOARD_HTML = BASE_STYLE + r"""
     </div>
   </div>
 
+  <!-- Latest results -->
   {% if latest_eval %}
-  <div class="results-wrap">
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px">
-      <h2 style="font-size:18px;font-weight:700">
-        🏆 最新评审结果
-        <span style="font-size:13px;font-weight:400;color:var(--t3)">{{ latest_eval.created_at }}</span>
-      </h2>
+  <div style="margin-bottom:32px">
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
+      <h2 style="font-size:19px;font-weight:800">🏆 评审结果</h2>
+      <span style="font-size:12px;color:var(--t3)">{{ latest_eval.created_at }}</span>
     </div>
     {% set results = latest_eval.results %}
     {% for r in results %}
@@ -755,13 +774,13 @@ DASHBOARD_HTML = BASE_STYLE + r"""
     <div class="res-card {{ rc }}">
       <div class="res-hd">
         <div class="medal {{ rc }}">{{ medal }}</div>
-        <div class="res-info">
+        <div style="flex:1;min-width:0">
           <div class="res-name">{{ r.name }}</div>
-          <div class="res-proj" style="font-size:12px;color:var(--t2);margin-top:2px">
-            {{ r.get('comment','')[:40] }}…
-          </div>
+          {% if r.get('highlights') %}
+          <div class="res-highlight">✨ {{ r.highlights }}</div>
+          {% endif %}
         </div>
-        <div class="tot">
+        <div style="text-align:right;flex-shrink:0">
           <div class="tot-n">{{ r.total }}</div>
           <div class="tot-of">/ 100 分</div>
         </div>
@@ -785,66 +804,67 @@ DASHBOARD_HTML = BASE_STYLE + r"""
             <div class="bar-bg"><div class="bar-fill" data-w="{{ (r.impact/25*100)|int }}%"></div></div>
           </div>
         </div>
-        <div class="comment">{{ r.comment }}</div>
+        <div class="comment-label">📝 评语</div>
+        <div class="comment-box">{{ r.comment }}</div>
       </div>
     </div>
     {% endfor %}
   </div>
   {% endif %}
 
-  <div style="display:flex;align-items:center;justify-content:space-between;
-              margin-bottom:14px;margin-top:28px">
-    <h2 style="font-size:17px;font-weight:700">
-      {{ current_month }} 参赛作品（{{ month_count }} 份）
-    </h2>
+  <!-- Submissions -->
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px">
+    <h2 style="font-size:17px;font-weight:700">{{ current_month }} 参赛作品（{{ month_count }}份）</h2>
   </div>
-
   <div class="sub-grid">
     {% if filtered_subs %}
-      {% for s in filtered_subs %}
-      <div class="sub-card">
-        <div class="sub-top">
-          <div class="av">{{ s.name[0] }}</div>
-          <div style="flex:1;min-width:0">
-            <div class="sub-name">{{ s.name }}</div>
-            {% if s.department %}
-            <span class="tag tag-dept">{{ s.department }}</span>
-            {% endif %}
-            {% if s.file_name %}
-            <span class="tag tag-file">📎 {{ s.file_name }}</span>
-            {% endif %}
-          </div>
+    {% for s in filtered_subs %}
+    <div class="sub-card">
+      <div class="sub-top">
+        <div class="av">{{ s.name[0] }}</div>
+        <div style="flex:1;min-width:0">
+          <div class="sub-name">{{ s.name }}</div>
+          {% if s.department %}<span class="tag tag-dept">{{ s.department }}</span>{% endif %}
+          {% if s.file_count > 0 %}<span class="tag tag-file">📎 {{ s.file_count }}个文件</span>{% endif %}
+          {% if s.link_count > 0 %}<span class="tag tag-link">🔗 {{ s.link_count }}个链接</span>{% endif %}
         </div>
-        {% if s.note %}
-        <div class="sub-note">{{ s.note }}</div>
+      </div>
+      {% if s.note %}<div class="sub-note">{{ s.note }}</div>{% endif %}
+      <div class="sub-meta">📅 {{ s.created_at[:16] }}</div>
+      <div class="sub-foot">
+        {% if s.file_count > 0 %}
+        <a href="/admin/files/{{ s.id }}" class="btn" target="_blank"
+           style="font-size:12px;padding:5px 10px;background:#f0f9ff;color:#0369a1;text-decoration:none">
+          ⬇ 查看文件
+        </a>
         {% endif %}
-        <div class="sub-meta">📅 {{ s.created_at[:16] }}</div>
-        <div class="sub-foot">
-          {% if s.file_name %}
-          <a href="/admin/download/{{ s.id }}" class="btn" style="font-size:12px;padding:5px 10px;background:#f0f9ff;color:#0369a1;text-decoration:none">
-            ⬇ 下载文件
-          </a>
-          {% endif %}
-          <button class="btn btn-d" style="padding:5px 12px;font-size:12px"
-                  onclick="deleteSub({{ s.id }}, this)">删除</button>
-        </div>
+        <button class="btn btn-d" style="padding:5px 12px;font-size:12px;margin-left:auto"
+                onclick="deleteSub({{ s.id }},this)">删除</button>
       </div>
-      {% endfor %}
+    </div>
+    {% endfor %}
     {% else %}
-      <div class="empty" style="grid-column:1/-1">
-        <div class="ei">📂</div>
-        <p style="font-size:14px">{{ current_month }} 暂无参赛作品<br>
-        <a href="/submit-link" style="color:var(--p)">复制员工提交链接</a> 发送给同事吧</p>
-      </div>
+    <div class="empty" style="grid-column:1/-1">
+      <div style="font-size:44px;margin-bottom:12px">📂</div>
+      <p style="font-size:14px">{{ current_month }} 暂无参赛作品<br>
+      <a href="/submit-link" style="color:var(--p)">复制员工提交链接</a> 发送给同事吧</p>
+    </div>
     {% endif %}
   </div>
 </div>
 
+<!-- Loading overlay -->
 <div class="overlay" id="overlay">
   <div class="ov-box">
     <div class="spinner"></div>
-    <h3>Claude 正在评审中…</h3>
-    <p>正在读取文件内容并综合分析，<br>含图片/视频时约需 1-2 分钟，<br>请勿关闭此页面</p>
+    <h3 style="margin-bottom:8px">Claude 正在评审中…</h3>
+    <p style="font-size:12px;color:var(--t2)">正在读取文件和链接内容，综合分析打分</p>
+    <div class="ov-steps">
+      <div class="ov-step active" id="step1">📂 读取文件内容…</div>
+      <div class="ov-step" id="step2">🔗 抓取链接内容…</div>
+      <div class="ov-step" id="step3">🤖 Claude 综合评审…</div>
+      <div class="ov-step" id="step4">✅ 生成评分和评语…</div>
+    </div>
   </div>
 </div>
 <div class="toast" id="toast"></div>
@@ -852,50 +872,57 @@ DASHBOARD_HTML = BASE_STYLE + r"""
 <script>
 const API_KEY_SET = {{ 'true' if api_key_set else 'false' }};
 
-function toast(msg, type='ok'){
-  const el = document.getElementById('toast');
-  el.textContent = msg; el.className = `toast show ${type}`;
-  setTimeout(()=>el.className='toast', 4000);
+function toast(msg,type='ok'){
+  const el=document.getElementById('toast');
+  el.textContent=msg;el.className=`toast show ${type}`;
+  setTimeout(()=>el.className='toast',4500);
 }
 
-async function deleteSub(id, btn){
-  if(!confirm('确定删除这份作品？')) return;
-  btn.disabled = true;
-  const res = await fetch(`/admin/delete/${id}`, {method:'POST'});
-  if(res.ok){
-    btn.closest('.sub-card').style.opacity='0';
-    setTimeout(()=>btn.closest('.sub-card').remove(), 300);
-    toast('作品已删除');
-  } else {
-    btn.disabled = false; toast('删除失败','err');
-  }
+async function deleteSub(id,btn){
+  if(!confirm('确定删除这份作品？'))return;
+  btn.disabled=true;
+  const res=await fetch(`/admin/delete/${id}`,{method:'POST'});
+  if(res.ok){btn.closest('.sub-card').style.opacity='0';setTimeout(()=>btn.closest('.sub-card').remove(),300);toast('已删除');}
+  else{btn.disabled=false;toast('删除失败','err');}
+}
+
+let stepTimer;
+function startStepAnim(){
+  const steps=[1,2,3,4];
+  let i=0;
+  stepTimer=setInterval(()=>{
+    steps.forEach(s=>document.getElementById('step'+s)?.classList.remove('active'));
+    document.getElementById('step'+steps[i])?.classList.add('active');
+    i=(i+1)%steps.length;
+  },2500);
 }
 
 async function startEval(){
-  const apiKey = API_KEY_SET ? '' : (document.getElementById('apiKeyInput')?.value.trim()||'');
-  if(!API_KEY_SET && !apiKey){ toast('❌ 请输入 Anthropic API Key','err'); return; }
+  const apiKey=API_KEY_SET?'':(document.getElementById('apiKeyInput')?.value.trim()||'');
+  if(!API_KEY_SET&&!apiKey){toast('❌ 请输入 API Key','err');return;}
   document.getElementById('overlay').classList.add('show');
-  document.getElementById('evalBtn').disabled = true;
-  try {
-    const res = await fetch('/admin/evaluate', {
-      method:'POST',
-      headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({api_key: apiKey, month: '{{ current_month }}'})
+  document.getElementById('evalBtn').disabled=true;
+  startStepAnim();
+  try{
+    const res=await fetch('/admin/evaluate',{
+      method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({api_key:apiKey,month:'{{ current_month }}'})
     });
-    const data = await res.json();
-    if(!res.ok) throw new Error(data.error||'评审失败');
+    const data=await res.json();
+    if(!res.ok)throw new Error(data.error||'评审失败');
     toast('🎉 评审完成！');
-    setTimeout(()=>location.reload(), 800);
-  } catch(err){
+    setTimeout(()=>location.reload(),800);
+  }catch(err){
     toast(`❌ ${err.message}`,'err');
-    document.getElementById('evalBtn').disabled = false;
-  } finally {
+    document.getElementById('evalBtn').disabled=false;
+  }finally{
+    clearInterval(stepTimer);
     document.getElementById('overlay').classList.remove('show');
   }
 }
 
 requestAnimationFrame(()=>requestAnimationFrame(()=>{
-  document.querySelectorAll('.bar-fill').forEach(b=>{ b.style.width = b.dataset.w; });
+  document.querySelectorAll('.bar-fill').forEach(b=>{b.style.width=b.dataset.w;});
 }));
 </script>
 """
@@ -908,23 +935,41 @@ LINK_HTML = BASE_STYLE + """
   <h2 style="font-size:20px;margin-bottom:8px">员工提交链接</h2>
   <p style="color:var(--t2);font-size:13px;margin-bottom:20px">将以下链接发送给员工，他们可以直接提交AI创新作品：</p>
   <div id="linkBox" style="background:#f8fafc;border:1.5px solid var(--bd);border-radius:10px;
-       padding:14px 18px;font-family:monospace;font-size:14px;
-       word-break:break-all;margin-bottom:16px;color:var(--p)"></div>
+       padding:14px 18px;font-family:monospace;font-size:14px;word-break:break-all;
+       margin-bottom:16px;color:var(--p)"></div>
   <button class="btn btn-p" onclick="copyLink()">📋 复制链接</button>
-  <a href="/admin/dashboard" class="btn" style="margin-left:8px;background:#f1f5f9;color:var(--t1)">
-    ← 返回后台
-  </a>
+  <a href="/admin/dashboard" class="btn" style="margin-left:8px;background:#f1f5f9;color:var(--t1)">← 返回后台</a>
 </div>
 <script>
-  const url = window.location.origin + '/';
-  document.getElementById('linkBox').textContent = url;
+  const url=window.location.origin+'/';
+  document.getElementById('linkBox').textContent=url;
   function copyLink(){
     navigator.clipboard.writeText(url).then(()=>{
-      document.querySelector('.btn-p').textContent = '✅ 已复制！';
-      setTimeout(()=>document.querySelector('.btn-p').textContent='📋 复制链接', 2000);
+      document.querySelector('.btn-p').textContent='✅ 已复制！';
+      setTimeout(()=>document.querySelector('.btn-p').textContent='📋 复制链接',2000);
     });
   }
 </script>
+"""
+
+# ── Files page ─────────────────────────────────────────────────────────────────
+FILES_HTML = BASE_STYLE + """
+<style>body{padding:32px 20px;max-width:640px;margin:0 auto;}</style>
+<a href="/admin/dashboard" class="btn" style="background:#f1f5f9;color:var(--t1);margin-bottom:20px;display:inline-flex">← 返回后台</a>
+<h2 style="font-size:18px;font-weight:700;margin-bottom:16px">{{ name }} 的附件</h2>
+{% for f in files %}
+<div style="display:flex;align-items:center;gap:12px;background:#fff;border:1.5px solid var(--bd);
+     border-radius:10px;padding:12px 16px;margin-bottom:8px;">
+  <span style="font-size:22px">📄</span>
+  <div style="flex:1;min-width:0">
+    <div style="font-size:14px;font-weight:600;word-break:break-all">{{ f.file_name }}</div>
+  </div>
+  <a href="/admin/download/{{ f.id }}" class="btn btn-p" style="font-size:13px;padding:7px 14px;text-decoration:none;flex-shrink:0">
+    ⬇ 下载
+  </a>
+</div>
+{% endfor %}
+{% if not files %}<p style="color:var(--t3)">暂无文件</p>{% endif %}
 """
 
 
@@ -945,38 +990,43 @@ def submit_post():
     note       = request.form.get('note','').strip()
 
     if not name or not note:
-        return render_template_string(
-            SUBMIT_HTML, month=month, success=False,
-            error='请填写姓名和简要说明（必填项）'
-        )
+        return render_template_string(SUBMIT_HTML, month=month, success=False,
+                                      error='请填写姓名和简要说明（必填项）')
 
-    # Handle file
-    file_name = file_ext = None
-    file_data = None
-    f = request.files.get('file')
-    if f and f.filename:
+    # Parse links
+    raw_links = request.form.getlist('links')
+    links = [u.strip() for u in raw_links if u.strip()]
+    links_json = json.dumps(links, ensure_ascii=False)
+
+    db = get_db()
+    cur = db.execute(
+        "INSERT INTO submissions (name,department,note,links,month) VALUES (?,?,?,?,?)",
+        (name, department, note, links_json, month)
+    )
+    sub_id = cur.lastrowid
+
+    # Save files
+    file_count = 0
+    uploaded_files = request.files.getlist('files')
+    for f in uploaded_files:
+        if not f or not f.filename:
+            continue
         fname = f.filename
         ext   = fname.rsplit('.',1)[-1].lower() if '.' in fname else ''
         if ext not in ALLOWED_EXTS:
-            return render_template_string(
-                SUBMIT_HTML, month=month, success=False,
-                error=f'不支持的文件类型 .{ext}，请上传 PDF、Word、HTML、图片或视频文件'
-            )
-        file_name = fname
-        file_ext  = ext
-        file_data = f.read()
+            continue
+        data = f.read()
+        db.execute(
+            "INSERT INTO submission_files (submission_id,file_name,file_ext,file_data) VALUES (?,?,?,?)",
+            (sub_id, fname, ext, data)
+        )
+        file_count += 1
 
-    db = get_db()
-    db.execute(
-        """INSERT INTO submissions (name,department,note,file_name,file_ext,file_data,month)
-           VALUES (?,?,?,?,?,?,?)""",
-        (name, department, note, file_name, file_ext, file_data, month)
-    )
     db.commit()
 
     return render_template_string(
         SUBMIT_HTML, month=month, success=True,
-        submitted_name=name, submitted_file=file_name, error=None
+        submitted_name=name, file_count=file_count, link_count=len(links), error=None
     )
 
 
@@ -988,8 +1038,7 @@ def admin_login():
 
 @app.route('/admin', methods=['POST'])
 def admin_login_post():
-    pwd = request.form.get('password','')
-    if pwd == ADMIN_PASSWORD:
+    if request.form.get('password','') == ADMIN_PASSWORD:
         session['admin_logged_in'] = True
         session.permanent = True
         return redirect(url_for('admin_dashboard'))
@@ -1007,9 +1056,7 @@ def admin_dashboard():
     db = get_db()
     current_month = request.args.get('month', datetime.now().strftime('%Y年%m月'))
 
-    months_rows = db.execute(
-        "SELECT DISTINCT month FROM submissions ORDER BY month DESC"
-    ).fetchall()
+    months_rows = db.execute("SELECT DISTINCT month FROM submissions ORDER BY month DESC").fetchall()
     months = [r['month'] for r in months_rows]
     if current_month not in months:
         months.insert(0, current_month)
@@ -1019,58 +1066,66 @@ def admin_dashboard():
         c = db.execute("SELECT COUNT(*) FROM submissions WHERE month=?", (m,)).fetchone()[0]
         month_counts[m] = c
 
-    subs = db.execute(
-        "SELECT id,name,department,note,file_name,file_ext,month,created_at "
-        "FROM submissions WHERE month=? ORDER BY created_at DESC",
+    subs_raw = db.execute(
+        "SELECT id,name,department,note,links,month,created_at FROM submissions WHERE month=? ORDER BY created_at DESC",
         (current_month,)
     ).fetchall()
+
+    filtered_subs = []
+    for s in subs_raw:
+        row = dict(s)
+        links = json.loads(row.get('links') or '[]')
+        fc = db.execute("SELECT COUNT(*) FROM submission_files WHERE submission_id=?", (row['id'],)).fetchone()[0]
+        row['file_count'] = fc
+        row['link_count'] = len(links)
+        filtered_subs.append(row)
 
     total_count = db.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
     eval_count  = db.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0]
 
     latest_eval = None
     eval_row = db.execute(
-        "SELECT * FROM evaluations WHERE month=? ORDER BY id DESC LIMIT 1",
-        (current_month,)
+        "SELECT * FROM evaluations WHERE month=? ORDER BY id DESC LIMIT 1", (current_month,)
     ).fetchone()
     if eval_row:
-        latest_eval = {
-            'created_at': eval_row['created_at'],
-            'results':    json.loads(eval_row['results_json'])
-        }
+        latest_eval = {'created_at': eval_row['created_at'], 'results': json.loads(eval_row['results_json'])}
 
     return render_template_string(
         DASHBOARD_HTML,
-        current_month=current_month,
-        months=months,
-        month_counts=month_counts,
-        month_count=month_counts.get(current_month, 0),
-        total_count=total_count,
-        eval_count=eval_count,
-        filtered_subs=[dict(s) for s in subs],
-        latest_eval=latest_eval,
+        current_month=current_month, months=months, month_counts=month_counts,
+        month_count=month_counts.get(current_month,0),
+        total_count=total_count, eval_count=eval_count,
+        filtered_subs=filtered_subs, latest_eval=latest_eval,
         api_key_set=bool(ANTHROPIC_API_KEY),
     )
 
 
-@app.route('/admin/download/<int:sub_id>')
+@app.route('/admin/files/<int:sub_id>')
 @login_required
-def admin_download(sub_id):
+def admin_files(sub_id):
     db = get_db()
-    row = db.execute(
-        "SELECT file_name, file_ext, file_data FROM submissions WHERE id=?",
-        (sub_id,)
-    ).fetchone()
-    if not row or not row['file_data']:
-        abort(404)
-    buf = io.BytesIO(row['file_data'])
-    return send_file(buf, download_name=row['file_name'], as_attachment=True)
+    sub = db.execute("SELECT name FROM submissions WHERE id=?", (sub_id,)).fetchone()
+    if not sub: abort(404)
+    files = db.execute(
+        "SELECT id,file_name,file_ext FROM submission_files WHERE submission_id=?", (sub_id,)
+    ).fetchall()
+    return render_template_string(FILES_HTML, name=sub['name'], files=[dict(f) for f in files])
+
+
+@app.route('/admin/download/<int:file_id>')
+@login_required
+def admin_download(file_id):
+    db = get_db()
+    row = db.execute("SELECT file_name,file_data FROM submission_files WHERE id=?", (file_id,)).fetchone()
+    if not row: abort(404)
+    return send_file(io.BytesIO(bytes(row['file_data'])), download_name=row['file_name'], as_attachment=True)
 
 
 @app.route('/admin/delete/<int:sub_id>', methods=['POST'])
 @login_required
 def admin_delete(sub_id):
     db = get_db()
+    db.execute("DELETE FROM submission_files WHERE submission_id=?", (sub_id,))
     db.execute("DELETE FROM submissions WHERE id=?", (sub_id,))
     db.commit()
     return jsonify({'ok': True})
@@ -1081,15 +1136,13 @@ def admin_delete(sub_id):
 def admin_evaluate():
     data  = request.get_json()
     month = data.get('month', datetime.now().strftime('%Y年%m月'))
-
     api_key = ANTHROPIC_API_KEY or data.get('api_key','').strip()
     if not api_key:
         return jsonify({'error': '请提供 Anthropic API Key'}), 400
 
     db   = get_db()
     rows = db.execute(
-        "SELECT * FROM submissions WHERE month=? ORDER BY created_at ASC",
-        (month,)
+        "SELECT * FROM submissions WHERE month=? ORDER BY created_at ASC", (month,)
     ).fetchall()
 
     if len(rows) < 2:
@@ -1097,23 +1150,24 @@ def admin_evaluate():
 
     client = anthropic.Anthropic(api_key=api_key)
 
-    # Process files for each submission
     subs_with_content = []
     for row in rows:
         s = dict(row)
+        files = db.execute(
+            "SELECT * FROM submission_files WHERE submission_id=?", (s['id'],)
+        ).fetchall()
+        files = [dict(f) for f in files]
+        s['file_count'] = len(files)
         try:
-            file_content = process_submission_file(s, client)
+            s['content'] = process_submission(s, files, client)
         except Exception as e:
-            file_content = f'[文件处理出错: {e}]'
-        s['file_content'] = file_content
+            s['content'] = f'[处理出错: {e}]'
         subs_with_content.append(s)
 
-    # Build prompt & call Claude
     prompt = build_eval_prompt(subs_with_content)
     try:
         message = client.messages.create(
-            model='claude-opus-4-6',
-            max_tokens=4096,
+            model='claude-opus-4-6', max_tokens=8192,
             messages=[{'role':'user','content':prompt}]
         )
         raw = message.content[0].text.strip()
@@ -1133,18 +1187,13 @@ def admin_evaluate():
         return jsonify({'error': '解析结果失败，请重试'}), 500
 
     for r in results:
-        r['total'] = (
-            r.get('innovation',0) + r.get('practicality',0) +
-            r.get('learning_depth',0) + r.get('impact',0)
-        )
+        r['total'] = (r.get('innovation',0)+r.get('practicality',0)+
+                      r.get('learning_depth',0)+r.get('impact',0))
     results.sort(key=lambda x: x.get('total',0), reverse=True)
 
-    db.execute(
-        "INSERT INTO evaluations (month, results_json) VALUES (?,?)",
-        (month, json.dumps(results, ensure_ascii=False))
-    )
+    db.execute("INSERT INTO evaluations (month,results_json) VALUES (?,?)",
+               (month, json.dumps(results, ensure_ascii=False)))
     db.commit()
-
     return jsonify({'ok': True, 'results': results})
 
 
@@ -1156,21 +1205,16 @@ def submit_link():
 
 @app.route('/health')
 def health():
-    return jsonify({'status': 'ok', 'version': '3.0-file-upload'})
+    return jsonify({'status':'ok','version':'4.0-multi-file-url'})
 
 
-# ══════════════════════════════════════════════════════════════════════════════
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
-    print()
-    print('=' * 58)
-    print('  🏆  AI创新评审系统 — 在线版 v3（支持文件上传）')
+    print(f'\n{"="*58}')
+    print('  🏆  AI创新评审系统 — 在线版 v4（多文件 + 链接）')
     print('  🚜  澳大利亚叉车租赁与销售公司')
-    print('=' * 58)
-    print(f'  🌐  员工提交页:   http://localhost:{port}/')
-    print(f'  🔐  管理员后台:   http://localhost:{port}/admin')
-    print(f'  🔑  管理员密码:   {ADMIN_PASSWORD}')
-    print(f'  🤖  API Key:     {"✅ 已配置" if ANTHROPIC_API_KEY else "❌ 未设置"}')
-    print('=' * 58)
-    print()
+    print(f'  🌐  http://localhost:{port}/')
+    print(f'  🔐  http://localhost:{port}/admin  密码: {ADMIN_PASSWORD}')
+    print(f'  🤖  API Key: {"✅ 已配置" if ANTHROPIC_API_KEY else "❌ 未设置"}')
+    print(f'{"="*58}\n')
     app.run(host='0.0.0.0', port=port, debug=False)
