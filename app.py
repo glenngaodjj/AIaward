@@ -466,7 +466,7 @@ def build_eval_prompt(subs_with_content: list) -> str:
 - 【硬性规则，不可违反】第一名必须是落地状态为"已完全落地，正在日常使用中"的作品。如果没有任何作品完全落地，则第一名空缺，排名从第二名开始。凡落地状态为"部分落地"或"尚未落地"的作品，无论其他维度得分多高，最终排名不得列第一。
 - 员工的四维度自述是重要参考依据，结合自述与实际作品内容综合评分，自述写得好但作品内容不匹配时适当扣分
 - 评分必须有区分度，不要平均分，优秀作品应明显拉开差距
-- 每人写一段100-150字的综合评语，必须具体、有针对性，同时指出亮点与改进方向，不要只夸奖，不要套话
+- 每人必须按四个维度分别写评语，每个维度 30-50 字，具体指出该维度的表现、亮点或不足，不要套话
 - 总分 = 四项之和，按总分降序排列
 - 严格输出纯JSON，无其他文字
 
@@ -482,8 +482,11 @@ def build_eval_prompt(subs_with_content: list) -> str:
     "learning_depth": 分数,
     "impact": 分数,
     "total": 合计,
-    "highlights": "亮点（1句话）",
-    "comment": "100-150字综合评语，具体指出作品特点、优势及改进建议"
+    "highlights": "亮点（1句话，概括整个作品最突出之处）",
+    "comment_innovation": "创新性维度评语，30-50字，具体指出创新表现或不足",
+    "comment_growth": "实用性维度评语，30-50字，结合落地状态具体评价",
+    "comment_learning": "开放学习维度评语，30-50字，评价学习深度与迭代能力",
+    "comment_impact": "长期影响力维度评语，30-50字，评价组织价值与可推广性"
   }}
 ]"""
 
@@ -1176,11 +1179,32 @@ DASHBOARD_HTML = BASE_STYLE + r"""
           </div>
         </div>
         <div class="comment-label">📝 评语</div>
-        <div class="comment-box">{{ r.comment }}</div>
+        {% if r.get('comment_innovation') %}
+        <div style="display:grid;gap:8px">
+          <div class="comment-box" style="border-left-color:#6366f1">
+            <div style="font-size:11px;font-weight:700;color:#6366f1;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">💡 创新性</div>
+            {{ r.comment_innovation }}
+          </div>
+          <div class="comment-box" style="border-left-color:#10b981">
+            <div style="font-size:11px;font-weight:700;color:#10b981;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">⚙️ 实用性</div>
+            {{ r.comment_growth }}
+          </div>
+          <div class="comment-box" style="border-left-color:#f59e0b">
+            <div style="font-size:11px;font-weight:700;color:#f59e0b;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">📚 开放学习</div>
+            {{ r.comment_learning }}
+          </div>
+          <div class="comment-box" style="border-left-color:#8b5cf6">
+            <div style="font-size:11px;font-weight:700;color:#8b5cf6;margin-bottom:4px;text-transform:uppercase;letter-spacing:.5px">🌟 长期影响力</div>
+            {{ r.comment_impact }}
+          </div>
+        </div>
+        {% else %}
+        <div class="comment-box">{{ r.get('comment','') }}</div>
+        {% endif %}
         {% if r.get('email') %}
         <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:12px;color:var(--t3)">✉️ {{ r.email }}</span>
-          <a href="https://mail.google.com/mail/?view=cm&to={{ r.email | urlencode }}&su={{ ('DJJ AI创新评选 — 你的专属评语') | urlencode }}&body={{ ('Hi ' + r.name + '，\n\n感谢参与本月 DJJ AI 创新评选！\n\n以下是评审对你作品的专属评语：\n\n' + r.comment + '\n\nDJJ 管理团队') | urlencode }}"
+          <a href="https://mail.google.com/mail/?view=cm&to={{ r.email | urlencode }}&su={{ ('DJJ AI创新评选 — 你的专属评语') | urlencode }}&body={{ ('Hi ' + r.name + '，\n\n感谢参与本月 DJJ AI 创新评选！以下是评审对你作品的专属评语：\n\n💡 创新性\n' + r.get('comment_innovation','') + '\n\n⚙️ 实用性\n' + r.get('comment_growth','') + '\n\n📚 开放学习\n' + r.get('comment_learning','') + '\n\n🌟 长期影响力\n' + r.get('comment_impact','') + '\n\nDJJ 管理团队') | urlencode }}"
              target="_blank"
              style="font-size:12px;padding:5px 12px;background:#ede9fe;color:#6d28d9;
                     border-radius:7px;text-decoration:none;font-weight:600">
