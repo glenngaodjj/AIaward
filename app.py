@@ -648,7 +648,7 @@ SUBMIT_HTML = BASE_STYLE + r"""
     <div class="drop-zone" id="screenshotZone" onclick="document.getElementById('screenshotInput').click()">
       <div class="dz-icon">📸</div>
       <div class="dz-title">点击或拖放上传截图</div>
-      <div class="dz-sub">最多 5 张 · 每张不超过 10MB · 支持 JPG / PNG / GIF / WebP</div>
+      <div class="dz-sub">最多 10 张 · 每张不超过 10MB · 支持 JPG / PNG / GIF / WebP</div>
     </div>
     <div class="file-list" id="screenshotList"></div>
   </div>
@@ -745,7 +745,7 @@ let selectedScreenshots=[];
 const ssi=document.getElementById('screenshotInput');
 const ssz=document.getElementById('screenshotZone');
 const ssl=document.getElementById('screenshotList');
-const SS_MAX_COUNT = 5;
+const SS_MAX_COUNT = 10;
 const SS_MAX_BYTES = 10 * 1024 * 1024; // 10MB per image
 
 function addScreenshots(files){
