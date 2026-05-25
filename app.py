@@ -647,8 +647,8 @@ SUBMIT_HTML = BASE_STYLE + r"""
            accept=".jpg,.jpeg,.png,.gif,.webp,.bmp">
     <div class="drop-zone" id="screenshotZone" onclick="document.getElementById('screenshotInput').click()">
       <div class="dz-icon">📸</div>
-      <div class="dz-title">点击上传截图</div>
-      <div class="dz-sub">支持 JPG / PNG / GIF / WebP，可多张</div>
+      <div class="dz-title">点击或拖放上传截图</div>
+      <div class="dz-sub">最多 5 张 · 每张不超过 10MB · 支持 JPG / PNG / GIF / WebP</div>
     </div>
     <div class="file-list" id="screenshotList"></div>
   </div>
@@ -745,20 +745,31 @@ let selectedScreenshots=[];
 const ssi=document.getElementById('screenshotInput');
 const ssz=document.getElementById('screenshotZone');
 const ssl=document.getElementById('screenshotList');
-ssi.addEventListener('change',()=>{
-  Array.from(ssi.files).forEach(f=>{
+const SS_MAX_COUNT = 5;
+const SS_MAX_BYTES = 10 * 1024 * 1024; // 10MB per image
+
+function addScreenshots(files){
+  let warned = false;
+  Array.from(files).forEach(f=>{
+    if(selectedScreenshots.length >= SS_MAX_COUNT){
+      if(!warned){ alert(`截图最多上传 ${SS_MAX_COUNT} 张，多余的已忽略`); warned=true; }
+      return;
+    }
+    if(f.size > SS_MAX_BYTES){
+      alert(`「${f.name}」超过 10MB 限制，已跳过`); return;
+    }
     if(!selectedScreenshots.find(x=>x.name===f.name&&x.size===f.size))
       selectedScreenshots.push(f);
   });
   syncScreenshots(); renderScreenshots();
-});
+}
+
+ssi.addEventListener('change',()=>{ addScreenshots(ssi.files); ssi.value=''; });
 ssz.addEventListener('dragover',e=>{e.preventDefault();ssz.classList.add('over');});
 ssz.addEventListener('dragleave',()=>ssz.classList.remove('over'));
 ssz.addEventListener('drop',e=>{
   e.preventDefault();ssz.classList.remove('over');
-  Array.from(e.dataTransfer.files).filter(f=>/\.(jpe?g|png|gif|webp|bmp)$/i.test(f.name))
-    .forEach(f=>{if(!selectedScreenshots.find(x=>x.name===f.name&&x.size===f.size))selectedScreenshots.push(f);});
-  syncScreenshots(); renderScreenshots();
+  addScreenshots(Array.from(e.dataTransfer.files).filter(f=>/\.(jpe?g|png|gif|webp|bmp)$/i.test(f.name)));
 });
 function syncScreenshots(){
   const dt=new DataTransfer();
@@ -767,6 +778,13 @@ function syncScreenshots(){
 }
 function renderScreenshots(){
   ssl.innerHTML='';
+  if(selectedScreenshots.length===0) return;
+  const counter=document.createElement('div');
+  const full=selectedScreenshots.length>=SS_MAX_COUNT;
+  counter.style.cssText=`margin-bottom:6px;font-size:12px;font-weight:600;
+    color:${full?'#b45309':'#166534'};`;
+  counter.textContent=`${full?'⚠️':'✅'} 已选 ${selectedScreenshots.length} / ${SS_MAX_COUNT} 张`;
+  ssl.appendChild(counter);
   selectedScreenshots.forEach((f,i)=>{
     const url=URL.createObjectURL(f);
     const div=document.createElement('div');
