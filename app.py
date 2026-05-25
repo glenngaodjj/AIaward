@@ -715,6 +715,12 @@ SUBMIT_HTML = BASE_STYLE + r"""
 
   <div class="sec">📎 上传文件（可多选）</div>
   <div class="fg">
+    <div style="background:linear-gradient(135deg,#eff6ff,#f0fdf4);border:1px solid #bfdbfe;
+                border-radius:10px;padding:12px 16px;margin-bottom:12px;font-size:13px;line-height:1.8;color:#1e40af">
+      💡 <strong>建议优先上传文件，而非链接</strong><br>
+      文件越详细越好，AI 可以直接读取内容进行评分。<br>
+      <span style="color:#dc2626">⚠️ 单次上传总大小请勿超过 200MB，建议单个文件不超过 50MB</span>
+    </div>
     <!-- Hidden inputs -->
     <input type="file" name="files" id="fileInput" multiple style="display:none"
            accept=".pdf,.doc,.docx,.txt,.md,.html,.htm,.php,.py,.js,.ts,.jsx,.tsx,.css,.json,.xml,.yaml,.yml,.csv,.jpg,.jpeg,.png,.gif,.webp,.bmp,.svg,.mp4,.mov,.avi,.mkv,.webm,.m4v,.pptx,.xlsx,.xls,.rb,.java,.cpp,.c,.go,.rs,.swift,.sh,.sql">
@@ -744,7 +750,7 @@ SUBMIT_HTML = BASE_STYLE + r"""
 
   <div class="sec">🔗 相关链接（可选）</div>
   <div class="fg">
-    <p class="hint" style="margin-bottom:10px">如有演示视频、在线工具、Google Drive 文档等，可在此添加链接</p>
+    <p class="hint" style="margin-bottom:10px">不建议使用链接，优先上传文件。如文件过大无法上传，可在此添加 Google Drive / YouTube 链接作为补充</p>
     <div class="url-list" id="urlList">
       <div class="url-row">
         <input type="url" name="links" placeholder="https://..." class="url-input">
