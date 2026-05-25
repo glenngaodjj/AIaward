@@ -463,6 +463,7 @@ def build_eval_prompt(subs_with_content: list) -> str:
 - 说明：不只看当前使用人数，也看长期组织价值与未来扩展潜力
 
 【评审要求】
+- 【硬性规则，不可违反】第一名必须是落地状态为"已完全落地，正在日常使用中"的作品。如果没有任何作品完全落地，则第一名空缺，排名从第二名开始。凡落地状态为"部分落地"或"尚未落地"的作品，无论其他维度得分多高，最终排名不得列第一。
 - 员工的四维度自述是重要参考依据，结合自述与实际作品内容综合评分，自述写得好但作品内容不匹配时适当扣分
 - 评分必须有区分度，不要平均分，优秀作品应明显拉开差距
 - 每人写一段100-150字的综合评语，必须具体、有针对性，同时指出亮点与改进方向，不要只夸奖，不要套话
@@ -1595,10 +1596,24 @@ def admin_evaluate():
     except Exception:
         return jsonify({'error': '解析结果失败，请重试'}), 500
 
+    # Build a lookup: name -> is_deployed status
+    deployed_map = {dict(row)['name']: dict(row).get('is_deployed','') for row in rows}
+
     for r in results:
         r['total'] = (r.get('innovation',0)+r.get('practicality',0)+
                       r.get('learning_depth',0)+r.get('impact',0))
+        r['is_deployed'] = deployed_map.get(r.get('name',''), '')
+
+    # Hard rule: #1 must be fully deployed; demote others to 2nd place at earliest
+    FULLY_DEPLOYED = '已完全落地，正在日常使用中'
     results.sort(key=lambda x: x.get('total',0), reverse=True)
+
+    fully = [r for r in results if r.get('is_deployed') == FULLY_DEPLOYED]
+    others = [r for r in results if r.get('is_deployed') != FULLY_DEPLOYED]
+    # Re-sort each group by score, then concatenate: fully deployed first
+    fully.sort(key=lambda x: x.get('total',0), reverse=True)
+    others.sort(key=lambda x: x.get('total',0), reverse=True)
+    results = fully + others
 
     db.execute("INSERT INTO evaluations (month,results_json) VALUES (?,?)",
                (month, json.dumps(results, ensure_ascii=False)))
