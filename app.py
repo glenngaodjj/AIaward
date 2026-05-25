@@ -113,7 +113,7 @@ def init_db():
             ('note', 'TEXT'), ('links', 'TEXT'),
             ('dim_innovation', 'TEXT'), ('dim_growth', 'TEXT'),
             ('dim_learning', 'TEXT'), ('dim_impact', 'TEXT'),
-            ('is_deployed', 'TEXT'),
+            ('is_deployed', 'TEXT'), ('email', 'TEXT'),
         ]:
             try:
                 db.execute(f"ALTER TABLE submissions ADD COLUMN {col} {definition}")
@@ -633,6 +633,11 @@ SUBMIT_HTML = BASE_STYLE + r"""
       <label class="lbl">部门（可选）</label>
       <input type="text" name="department" placeholder="如：销售部、运维部" maxlength="50">
     </div>
+  </div>
+  <div class="fg">
+    <label class="lbl">邮箱 <span class="req">*</span></label>
+    <input type="email" name="email" placeholder="your@email.com" required maxlength="100">
+    <p class="hint">评审结果和个人评语将发送到此邮箱</p>
   </div>
 
   <div class="sec">💬 简要说明</div>
@@ -1166,6 +1171,16 @@ DASHBOARD_HTML = BASE_STYLE + r"""
         </div>
         <div class="comment-label">📝 评语</div>
         <div class="comment-box">{{ r.comment }}</div>
+        {% if r.get('email') %}
+        <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
+          <span style="font-size:12px;color:var(--t3)">✉️ {{ r.email }}</span>
+          <a href="mailto:{{ r.email }}?subject=DJJ AI创新评选 — 你的专属评语&body=Hi {{ r.name }}，%0A%0A感谢参与本月 DJJ AI 创新评选！以下是你的专属评语：%0A%0A✨ 亮点：{{ r.highlights }}%0A%0A📝 评语：{{ r.comment }}%0A%0ADJJ 管理团队"
+             style="font-size:12px;padding:5px 12px;background:#ede9fe;color:#6d28d9;
+                    border-radius:7px;text-decoration:none;font-weight:600">
+            ✉️ 发送评语给 {{ r.name }}
+          </a>
+        </div>
+        {% endif %}
       </div>
     </div>
     {% endfor %}
@@ -1190,12 +1205,31 @@ DASHBOARD_HTML = BASE_STYLE + r"""
         </div>
       </div>
       {% if s.note %}<div class="sub-note">{{ s.note }}</div>{% endif %}
-      <div class="sub-meta">📅 {{ s.created_at[:16] }}</div>
+      <div class="sub-meta" style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin-top:8px">
+        <span>📅 {{ s.created_at[:16] }}</span>
+        {% if s.email %}
+        <span style="color:#6366f1;font-size:11px">✉️ {{ s.email }}</span>
+        {% endif %}
+        {% if s.is_deployed %}
+        <span style="font-size:11px;padding:2px 7px;border-radius:999px;font-weight:600;
+          background:{% if s.is_deployed == '已完全落地，正在日常使用中' %}#f0fdf4;color:#166534
+          {% elif s.is_deployed == '部分落地，仍在测试和完善中' %}#fff7ed;color:#9a3412
+          {% else %}#f1f5f9;color:#475569{% endif %}">
+          {{ s.is_deployed }}
+        </span>
+        {% endif %}
+      </div>
       <div class="sub-foot">
         {% if s.file_count > 0 %}
         <a href="/admin/files/{{ s.id }}" class="btn" target="_blank"
            style="font-size:12px;padding:5px 10px;background:#f0f9ff;color:#0369a1;text-decoration:none">
           ⬇ 查看文件
+        </a>
+        {% endif %}
+        {% if s.email %}
+        <a href="mailto:{{ s.email }}?subject=DJJ AI创新评选 — 你的专属评语&body=Hi {{ s.name }}，%0A%0A感谢你参与本月 DJJ AI 创新评选！%0A%0A以下是你的专属评语，请查阅。%0A%0A（请在此粘贴评语内容）%0A%0ADJJ 管理团队"
+           class="btn" style="font-size:12px;padding:5px 10px;background:#ede9fe;color:#6d28d9;text-decoration:none">
+          ✉️ 发送评语
         </a>
         {% endif %}
         <button class="btn btn-d" style="padding:5px 12px;font-size:12px;margin-left:auto"
@@ -1365,11 +1399,12 @@ def submit_post():
         dim_learning   = request.form.get('dim_learning','').strip()
         dim_impact     = request.form.get('dim_impact','').strip()
         is_deployed    = request.form.get('is_deployed','').strip()
+        email          = request.form.get('email','').strip()
 
         db = get_db()
         cur = db.execute(
-            "INSERT INTO submissions (name,department,note,links,dim_innovation,dim_growth,dim_learning,dim_impact,is_deployed,month) VALUES (?,?,?,?,?,?,?,?,?,?)",
-            (name, department, note, links_json, dim_innovation, dim_growth, dim_learning, dim_impact, is_deployed, month)
+            "INSERT INTO submissions (name,department,note,links,dim_innovation,dim_growth,dim_learning,dim_impact,is_deployed,email,month) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (name, department, note, links_json, dim_innovation, dim_growth, dim_learning, dim_impact, is_deployed, email, month)
         )
         sub_id = cur.lastrowid
 
@@ -1469,7 +1504,7 @@ def admin_dashboard():
         month_counts[m] = c
 
     subs_raw = db.execute(
-        "SELECT id,name,department,note,links,month,created_at FROM submissions WHERE month=? ORDER BY created_at DESC",
+        "SELECT id,name,department,note,links,email,is_deployed,month,created_at FROM submissions WHERE month=? ORDER BY created_at DESC",
         (current_month,)
     ).fetchall()
 
@@ -1561,6 +1596,9 @@ def admin_evaluate():
     client = anthropic.Anthropic(api_key=api_key)
 
     subs_with_content = []
+    # Build email lookup for results display
+    email_map = {dict(row)['name']: dict(row).get('email','') for row in rows}
+
     for row in rows:
         s = dict(row)
         files = db.execute(
@@ -1614,6 +1652,10 @@ def admin_evaluate():
     fully.sort(key=lambda x: x.get('total',0), reverse=True)
     others.sort(key=lambda x: x.get('total',0), reverse=True)
     results = fully + others
+
+    # Attach email to each result for display
+    for r in results:
+        r['email'] = email_map.get(r.get('name',''), '')
 
     db.execute("INSERT INTO evaluations (month,results_json) VALUES (?,?)",
                (month, json.dumps(results, ensure_ascii=False)))
