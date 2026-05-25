@@ -109,7 +109,11 @@ def init_db():
             );
         """)
         # Migration: add new columns to submissions if missing
-        for col, definition in [('note', 'TEXT'), ('links', 'TEXT')]:
+        for col, definition in [
+            ('note', 'TEXT'), ('links', 'TEXT'),
+            ('dim_innovation', 'TEXT'), ('dim_growth', 'TEXT'),
+            ('dim_learning', 'TEXT'), ('dim_impact', 'TEXT'),
+        ]:
             try:
                 db.execute(f"ALTER TABLE submissions ADD COLUMN {col} {definition}")
             except Exception:
@@ -402,6 +406,16 @@ def build_eval_prompt(subs_with_content: list) -> str:
     for i, s in enumerate(subs_with_content, 1):
         links = json.loads(s.get('links') or '[]')
         file_count = s.get('file_count', 0)
+
+        dim_section = ''
+        if any(s.get(k) for k in ('dim_innovation','dim_growth','dim_learning','dim_impact')):
+            dim_section = f"""
+【员工四维度自述】
+💡 创新性自述：{s.get('dim_innovation') or '（未填写）'}
+⚙️ 实用性自述：{s.get('dim_growth') or '（未填写）'}
+📚 开放学习自述：{s.get('dim_learning') or '（未填写）'}
+🌟 长期影响力自述：{s.get('dim_impact') or '（未填写）'}
+"""
         block += f"""
 {'='*60}
 【参赛作品 {i}】
@@ -410,8 +424,8 @@ def build_eval_prompt(subs_with_content: list) -> str:
 简要说明：{s['note'] or '（未填写）'}
 附件数量：{file_count} 个文件  |  链接数量：{len(links)} 个
 提交时间：{s['created_at']}
-
-【作品内容详情】
+{dim_section}
+【作品内容详情（文件/链接）】
 {s.get('content','（无内容）')}
 """
     return f"""你是专业公正的AI创新评审专家，正在评选本月"最佳AI创新应用奖"。
@@ -447,6 +461,7 @@ def build_eval_prompt(subs_with_content: list) -> str:
 - 说明：不只看当前使用人数，也看长期组织价值与未来扩展潜力
 
 【评审要求】
+- 员工的四维度自述是重要参考依据，结合自述与实际作品内容综合评分，自述写得好但作品内容不匹配时适当扣分
 - 评分必须有区分度，不要平均分，优秀作品应明显拉开差距
 - 每人写一段100-150字的综合评语，必须具体、有针对性，同时指出亮点与改进方向，不要只夸奖，不要套话
 - 总分 = 四项之和，按总分降序排列
@@ -625,6 +640,51 @@ SUBMIT_HTML = BASE_STYLE + r"""
     <div class="char-count"><span id="nc">0</span> / 600</div>
   </div>
 
+  <div class="sec">📸 作品截图（可多张）</div>
+  <div class="fg">
+    <p class="hint" style="margin-bottom:10px">上传能直观展示你作品的截图，帮助评审更好理解你的工作成果</p>
+    <input type="file" name="screenshots" id="screenshotInput" multiple style="display:none"
+           accept=".jpg,.jpeg,.png,.gif,.webp,.bmp">
+    <div class="drop-zone" id="screenshotZone" onclick="document.getElementById('screenshotInput').click()">
+      <div class="dz-icon">📸</div>
+      <div class="dz-title">点击上传截图</div>
+      <div class="dz-sub">支持 JPG / PNG / GIF / WebP，可多张</div>
+    </div>
+    <div class="file-list" id="screenshotList"></div>
+  </div>
+
+  <div class="sec">💡 四维度自述（帮助AI更准确评分）</div>
+  <div style="display:grid;gap:14px;margin-bottom:4px">
+    <div class="fg" style="margin-bottom:0">
+      <label class="lbl" style="color:#6366f1">💡 创新性 — 你的作品如何体现创新？</label>
+      <textarea name="dim_innovation" rows="2" maxlength="400"
+        placeholder="例：我用 AI 重新设计了报价流程，从手动填表改为语音输入自动生成，打破了传统工作方式…"
+        oninput="updateCount(this,'nc1')"></textarea>
+      <div class="char-count"><span id="nc1">0</span> / 400</div>
+    </div>
+    <div class="fg" style="margin-bottom:0">
+      <label class="lbl" style="color:#10b981">⚙️ 实用性 — 它解决了什么实际问题？效果如何？</label>
+      <textarea name="dim_growth" rows="2" maxlength="400"
+        placeholder="例：每周节省约3小时的手动整理时间，错误率从15%降到2%，已在日常工作中稳定使用2个月…"
+        oninput="updateCount(this,'nc2')"></textarea>
+      <div class="char-count"><span id="nc2">0</span> / 400</div>
+    </div>
+    <div class="fg" style="margin-bottom:0">
+      <label class="lbl" style="color:#f59e0b">📚 开放学习 — 你是如何学习和迭代的？</label>
+      <textarea name="dim_learning" rows="2" maxlength="400"
+        placeholder="例：我从零开始学习 Prompt 工程，失败了8次后找到有效方法，还在团队内部分享了学习过程…"
+        oninput="updateCount(this,'nc3')"></textarea>
+      <div class="char-count"><span id="nc3">0</span> / 400</div>
+    </div>
+    <div class="fg" style="margin-bottom:0">
+      <label class="lbl" style="color:#8b5cf6">🌟 长期影响力 — 它对团队或公司有什么长期价值？</label>
+      <textarea name="dim_impact" rows="2" maxlength="400"
+        placeholder="例：这套流程已整理成 SOP，其他同事可以直接复用，预计可推广到3个部门…"
+        oninput="updateCount(this,'nc4')"></textarea>
+      <div class="char-count"><span id="nc4">0</span> / 400</div>
+    </div>
+  </div>
+
   <div class="sec">📎 上传文件（可多选）</div>
   <div class="fg">
     <!-- Hidden inputs -->
@@ -679,6 +739,45 @@ SUBMIT_HTML = BASE_STYLE + r"""
 const EXT_ICONS={pdf:'📕',doc:'📘',docx:'📘',html:'🌐',htm:'🌐',
   jpg:'🖼️',jpeg:'🖼️',png:'🖼️',gif:'🖼️',webp:'🖼️',bmp:'🖼️',
   mp4:'🎬',mov:'🎬',avi:'🎬',mkv:'🎬',webm:'🎬',m4v:'🎬'};
+
+// Screenshot upload
+let selectedScreenshots=[];
+const ssi=document.getElementById('screenshotInput');
+const ssz=document.getElementById('screenshotZone');
+const ssl=document.getElementById('screenshotList');
+ssi.addEventListener('change',()=>{
+  Array.from(ssi.files).forEach(f=>{
+    if(!selectedScreenshots.find(x=>x.name===f.name&&x.size===f.size))
+      selectedScreenshots.push(f);
+  });
+  syncScreenshots(); renderScreenshots();
+});
+ssz.addEventListener('dragover',e=>{e.preventDefault();ssz.classList.add('over');});
+ssz.addEventListener('dragleave',()=>ssz.classList.remove('over'));
+ssz.addEventListener('drop',e=>{
+  e.preventDefault();ssz.classList.remove('over');
+  Array.from(e.dataTransfer.files).filter(f=>/\.(jpe?g|png|gif|webp|bmp)$/i.test(f.name))
+    .forEach(f=>{if(!selectedScreenshots.find(x=>x.name===f.name&&x.size===f.size))selectedScreenshots.push(f);});
+  syncScreenshots(); renderScreenshots();
+});
+function syncScreenshots(){
+  const dt=new DataTransfer();
+  selectedScreenshots.forEach(f=>dt.items.add(f));
+  ssi.files=dt.files;
+}
+function renderScreenshots(){
+  ssl.innerHTML='';
+  selectedScreenshots.forEach((f,i)=>{
+    const url=URL.createObjectURL(f);
+    const div=document.createElement('div');
+    div.className='file-item';
+    div.innerHTML=`<img src="${url}" style="width:48px;height:48px;object-fit:cover;border-radius:6px;flex-shrink:0">
+      <div class="fi-info"><div class="fi-name">${f.name}</div><div class="fi-size">${fmtSize(f.size)}</div></div>
+      <button type="button" class="fi-rm" onclick="removeScreenshot(${i})">✕</button>`;
+    ssl.appendChild(div);
+  });
+}
+function removeScreenshot(idx){selectedScreenshots.splice(idx,1);syncScreenshots();renderScreenshots();}
 
 function fmtSize(b){
   if(b<1024)return b+'B';
@@ -1219,10 +1318,16 @@ def submit_post():
         links = [u.strip() for u in raw_links if u.strip()]
         links_json = json.dumps(links, ensure_ascii=False)
 
+        # Four dimension self-assessments
+        dim_innovation = request.form.get('dim_innovation','').strip()
+        dim_growth     = request.form.get('dim_growth','').strip()
+        dim_learning   = request.form.get('dim_learning','').strip()
+        dim_impact     = request.form.get('dim_impact','').strip()
+
         db = get_db()
         cur = db.execute(
-            "INSERT INTO submissions (name,department,note,links,month) VALUES (?,?,?,?,?)",
-            (name, department, note, links_json, month)
+            "INSERT INTO submissions (name,department,note,links,dim_innovation,dim_growth,dim_learning,dim_impact,month) VALUES (?,?,?,?,?,?,?,?,?)",
+            (name, department, note, links_json, dim_innovation, dim_growth, dim_learning, dim_impact, month)
         )
         sub_id = cur.lastrowid
 
@@ -1245,6 +1350,26 @@ def submit_post():
             db.execute(
                 "INSERT INTO submission_files (submission_id,file_name,file_ext,file_path) VALUES (?,?,?,?)",
                 (sub_id, fname, ext, fpath)
+            )
+            file_count += 1
+
+        # Save screenshots (image files tagged as 'screenshot')
+        import uuid as _uuid
+        for f in request.files.getlist('screenshots'):
+            if not f or not f.filename:
+                continue
+            fname = os.path.basename(f.filename.replace('\\', '/'))
+            if not fname:
+                continue
+            ext = fname.rsplit('.',1)[-1].lower() if '.' in fname else ''
+            if ext not in {'jpg','jpeg','png','gif','webp','bmp'}:
+                continue
+            safe_name = f"screenshot_{_uuid.uuid4().hex}_{fname}"
+            fpath = os.path.join(UPLOAD_DIR, safe_name)
+            f.save(fpath)
+            db.execute(
+                "INSERT INTO submission_files (submission_id,file_name,file_ext,file_path) VALUES (?,?,?,?)",
+                (sub_id, f'[截图] {fname}', ext, fpath)
             )
             file_count += 1
 
