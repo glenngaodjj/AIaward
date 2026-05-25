@@ -1174,7 +1174,7 @@ DASHBOARD_HTML = BASE_STYLE + r"""
         {% if r.get('email') %}
         <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:12px;color:var(--t3)">✉️ {{ r.email }}</span>
-          <a href="mailto:{{ r.email }}?subject=DJJ AI创新评选 — 你的专属评语&body=Hi {{ r.name }}，%0A%0A感谢参与本月 DJJ AI 创新评选！以下是你的专属评语：%0A%0A✨ 亮点：{{ r.highlights }}%0A%0A📝 评语：{{ r.comment }}%0A%0ADJJ 管理团队"
+          <a href="mailto:{{ r.email }}?subject=DJJ AI创新评选 — 你的专属评语&body=Hi {{ r.name }}，%0A%0A感谢参与本月 DJJ AI 创新评选！%0A%0A以下是评审对你作品的专属评语：%0A%0A{{ r.comment }}%0A%0ADJJ 管理团队"
              style="font-size:12px;padding:5px 12px;background:#ede9fe;color:#6d28d9;
                     border-radius:7px;text-decoration:none;font-weight:600">
             ✉️ 发送评语给 {{ r.name }}
@@ -1227,7 +1227,7 @@ DASHBOARD_HTML = BASE_STYLE + r"""
         </a>
         {% endif %}
         {% if s.email %}
-        <a href="mailto:{{ s.email }}?subject=DJJ AI创新评选 — 你的专属评语&body=Hi {{ s.name }}，%0A%0A感谢你参与本月 DJJ AI 创新评选！%0A%0A以下是你的专属评语，请查阅。%0A%0A（请在此粘贴评语内容）%0A%0ADJJ 管理团队"
+        <a href="mailto:{{ s.email }}?subject=DJJ AI创新评选 — 你的专属评语&body=Hi {{ s.name }}，%0A%0A感谢你参与本月 DJJ AI 创新评选！%0A%0A（请在此粘贴该员工的评语）%0A%0ADJJ 管理团队"
            class="btn" style="font-size:12px;padding:5px 10px;background:#ede9fe;color:#6d28d9;text-decoration:none">
           ✉️ 发送评语
         </a>
