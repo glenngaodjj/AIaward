@@ -113,6 +113,7 @@ def init_db():
             ('note', 'TEXT'), ('links', 'TEXT'),
             ('dim_innovation', 'TEXT'), ('dim_growth', 'TEXT'),
             ('dim_learning', 'TEXT'), ('dim_impact', 'TEXT'),
+            ('is_deployed', 'TEXT'),
         ]:
             try:
                 db.execute(f"ALTER TABLE submissions ADD COLUMN {col} {definition}")
@@ -408,11 +409,12 @@ def build_eval_prompt(subs_with_content: list) -> str:
         file_count = s.get('file_count', 0)
 
         dim_section = ''
-        if any(s.get(k) for k in ('dim_innovation','dim_growth','dim_learning','dim_impact')):
+        if any(s.get(k) for k in ('dim_innovation','dim_growth','dim_learning','dim_impact','is_deployed')):
             dim_section = f"""
 【员工四维度自述】
 💡 创新性自述：{s.get('dim_innovation') or '（未填写）'}
 ⚙️ 实用性自述：{s.get('dim_growth') or '（未填写）'}
+   📍 落地状态：{s.get('is_deployed') or '（未选择）'}
 📚 开放学习自述：{s.get('dim_learning') or '（未填写）'}
 🌟 长期影响力自述：{s.get('dim_impact') or '（未填写）'}
 """
@@ -668,6 +670,26 @@ SUBMIT_HTML = BASE_STYLE + r"""
         placeholder="例：每周节省约3小时的手动整理时间，错误率从15%降到2%，已在日常工作中稳定使用2个月…"
         oninput="updateCount(this,'nc2')"></textarea>
       <div class="char-count"><span id="nc2">0</span> / 400</div>
+      <div style="margin-top:10px">
+        <div style="font-size:12px;font-weight:600;color:#475569;margin-bottom:8px">📍 作品落地状态</div>
+        <div style="display:flex;flex-direction:column;gap:6px">
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;
+                        background:#f0fdf4;border:1.5px solid #86efac;border-radius:8px;padding:8px 12px">
+            <input type="radio" name="is_deployed" value="已完全落地，正在日常使用中" style="width:auto;accent-color:#10b981">
+            <span>✅ 已完全落地，正在日常使用中</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;
+                        background:#fff7ed;border:1.5px solid #fed7aa;border-radius:8px;padding:8px 12px">
+            <input type="radio" name="is_deployed" value="部分落地，仍在测试和完善中" style="width:auto;accent-color:#f59e0b">
+            <span>🔧 部分落地，仍在测试和完善中</span>
+          </label>
+          <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;
+                        background:#f8fafc;border:1.5px solid #e2e8f0;border-radius:8px;padding:8px 12px">
+            <input type="radio" name="is_deployed" value="尚未落地，目前为概念/原型阶段" style="width:auto;accent-color:#94a3b8">
+            <span>💡 尚未落地，目前为概念/原型阶段</span>
+          </label>
+        </div>
+      </div>
     </div>
     <div class="fg" style="margin-bottom:0">
       <label class="lbl" style="color:#f59e0b">📚 开放学习 — 你是如何学习和迭代的？</label>
@@ -1341,11 +1363,12 @@ def submit_post():
         dim_growth     = request.form.get('dim_growth','').strip()
         dim_learning   = request.form.get('dim_learning','').strip()
         dim_impact     = request.form.get('dim_impact','').strip()
+        is_deployed    = request.form.get('is_deployed','').strip()
 
         db = get_db()
         cur = db.execute(
-            "INSERT INTO submissions (name,department,note,links,dim_innovation,dim_growth,dim_learning,dim_impact,month) VALUES (?,?,?,?,?,?,?,?,?)",
-            (name, department, note, links_json, dim_innovation, dim_growth, dim_learning, dim_impact, month)
+            "INSERT INTO submissions (name,department,note,links,dim_innovation,dim_growth,dim_learning,dim_impact,is_deployed,month) VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (name, department, note, links_json, dim_innovation, dim_growth, dim_learning, dim_impact, is_deployed, month)
         )
         sub_id = cur.lastrowid
 
