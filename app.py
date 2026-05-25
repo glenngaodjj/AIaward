@@ -372,15 +372,29 @@ def process_submission(sub: dict, files: list, client) -> str:
 
 # ── AI Evaluation ──────────────────────────────────────────────────────────────
 COMPANY_CONTEXT = """
-【公司背景】
-我们是一家总部位于澳大利亚的叉车租赁与销售公司，主营业务：
-- 叉车短期/长期租赁（仓储、物流、零售、建筑等行业客户）
-- 新旧叉车销售与以旧换新
-- 叉车维护保养与维修服务
-- 操作员培训与安全合规
-- 零配件供应
+【公司背景与核心理念】
+DJJ是一家总部位于澳大利亚的叉车租赁与销售公司。
 
-员工日常工作：客户询价报价、设备调度合同管理、维修工单处理、库存盘点、安全巡检、财务开票、客服沟通等。
+这次AI创新评选，不仅仅是一次活动，而是DJJ推动组织进入AI时代的重要起点。
+公司的核心价值观：开放 · 成长 · 创新 · 长期。
+
+我们真正希望推动的方向：
+- 主动学习，而非被动等待
+- 愿意改变，而非守旧执行
+- 系统化思维，而非碎片化操作
+- 推动结果，而非停留在概念
+- 长期沉淀，而非一次性使用
+- 组织协同，而非单点突破
+
+【评审视角】
+这次评审，不是在评"谁会用AI工具"，而是在评：
+谁体现了开放学习、主动成长、创新思维与长期建设的能力。
+
+参赛方向面向全公司所有职能，包括但不限于：
+销售、客服、运营、财务、维修、组织管理、团队协同、流程优化、系统建设、数据分析、培训、自动化、知识沉淀等。
+
+AI不是额外工具，而是未来新的工作方式。
+凡是真正帮助工作方式升级、效率提升、组织能力建设与长期价值沉淀的AI应用，均属于高价值方向。
 """
 
 def build_eval_prompt(subs_with_content: list) -> str:
@@ -405,15 +419,36 @@ def build_eval_prompt(subs_with_content: list) -> str:
 {COMPANY_CONTEXT}
 
 【评审标准（每项满分25分，合计100分）】
-1. 创新性（25分）：想法是否新颖，是否创造性运用了AI技术或工具
-2. 实用性（25分）：能否真实解决叉车业务痛点，实际可行性高
-3. 学习深度（25分）：对AI工具/技术的理解掌握程度，学习的系统性
-4. 影响力（25分）：惠及人数、业务范围、推广价值与潜在效益
+
+1. 创新性 Innovation（25分）
+- 是否利用AI重新定义工作方式
+- 是否具备主动探索与创新意识
+- 是否创造性组合AI工具、流程或系统
+- 是否突破传统执行模式，体现对未来工作方式的思考
+- 高分标准：真正体现AI时代的新工作逻辑，而不仅是简单工具使用
+
+2. 实用性 Growth（25分）
+- 是否真正提升工作效率或业务结果
+- 是否解决实际问题，具备落地能力，能长期稳定使用
+- 是否对团队、流程、协同或管理产生实际帮助
+- 说明：不仅限于销售或叉车业务，组织、系统、流程、管理类AI应用同样属于高价值方向
+- 高分：已实际使用并产生明显效果；中高分：已完成核心测试，具备落地潜力；中低分：概念多于实际落地
+
+3. 开放学习能力 Open Learning（25分）
+- 是否主动学习AI，具备持续迭代能力
+- 是否真正理解AI逻辑，而非机械使用
+- 是否体现开放思维与学习速度
+- 高分标准：不仅"会用AI"，而是真正开始理解AI时代的工作逻辑
+
+4. 长期影响力 Long-term Impact（25分）
+- 是否具备长期价值，可复制、可推广
+- 是否能沉淀为组织能力，改变团队工作方式
+- 是否对未来协同、培训、管理或系统建设有帮助
+- 说明：不只看当前使用人数，也看长期组织价值与未来扩展潜力
 
 【评审要求】
-- 结合叉车业务背景评分，重点看对业务的实际帮助
-- 评分要有区分度，不要所有人得分接近
-- 每人写一段100-150字的综合评语，要具体、有针对性，指出亮点和可改进之处
+- 评分必须有区分度，不要平均分，优秀作品应明显拉开差距
+- 每人写一段100-150字的综合评语，必须具体、有针对性，同时指出亮点与改进方向，不要只夸奖，不要套话
 - 总分 = 四项之和，按总分降序排列
 - 严格输出纯JSON，无其他文字
 
@@ -534,9 +569,11 @@ SUBMIT_HTML = BASE_STYLE + r"""
 </style>
 
 <div class="hero">
-  <div class="badge">🏆 {{ month }} · 月度AI创新大奖</div>
-  <h1>提交你的AI创新作品</h1>
-  <p>上传作品文件和链接，加上简要说明，即可参与本月评选 🚀</p>
+  <div class="badge">🏆 {{ month }} · DJJ AI 创新评选</div>
+  <h1>提交你的 AI 创新作品</h1>
+  <p>这不只是一次比赛。<br>
+  这是 DJJ 迈入 AI 时代的第一步 —— 我们真正奖励的是：<br>
+  <strong>开放学习 · 主动成长 · 创新思维 · 长期建设</strong></p>
 </div>
 
 <div class="wrap">
@@ -563,7 +600,7 @@ SUBMIT_HTML = BASE_STYLE + r"""
 
 <div class="info-box">
   📋 评审从四个维度打分（各25分，共100分）：<br>
-  💡 <strong>创新性</strong> · ⚙️ <strong>实用性</strong> · 📚 <strong>学习深度</strong> · 🌟 <strong>影响力</strong>
+  💡 <strong>创新性</strong> · ⚙️ <strong>实用性</strong> · 📚 <strong>开放学习能力</strong> · 🌟 <strong>长期影响力</strong>
 </div>
 
 <form method="POST" action="/" enctype="multipart/form-data" id="subForm">
@@ -971,19 +1008,19 @@ DASHBOARD_HTML = BASE_STYLE + r"""
       <div class="res-bd">
         <div class="sc-grid">
           <div class="sc-row">
-            <label>💡 创新性 <span>{{ r.innovation }}/25</span></label>
+            <label>💡 创新性 Innovation <span>{{ r.innovation }}/25</span></label>
             <div class="bar-bg"><div class="bar-fill" data-w="{{ (r.innovation/25*100)|int }}%"></div></div>
           </div>
           <div class="sc-row">
-            <label>⚙️ 实用性 <span>{{ r.practicality }}/25</span></label>
+            <label>⚙️ 实用性 Growth <span>{{ r.practicality }}/25</span></label>
             <div class="bar-bg"><div class="bar-fill" data-w="{{ (r.practicality/25*100)|int }}%"></div></div>
           </div>
           <div class="sc-row">
-            <label>📚 学习深度 <span>{{ r.learning_depth }}/25</span></label>
+            <label>📚 开放学习 Open Learning <span>{{ r.learning_depth }}/25</span></label>
             <div class="bar-bg"><div class="bar-fill" data-w="{{ (r.learning_depth/25*100)|int }}%"></div></div>
           </div>
           <div class="sc-row">
-            <label>🌟 影响力 <span>{{ r.impact }}/25</span></label>
+            <label>🌟 长期影响力 Long-term Impact <span>{{ r.impact }}/25</span></label>
             <div class="bar-bg"><div class="bar-fill" data-w="{{ (r.impact/25*100)|int }}%"></div></div>
           </div>
         </div>
@@ -1196,7 +1233,9 @@ def submit_post():
         for f in uploaded_files:
             if not f or not f.filename:
                 continue
-            fname = f.filename
+            fname = os.path.basename(f.filename.replace('\\', '/'))  # strip folder path
+            if not fname:
+                continue
             ext   = fname.rsplit('.',1)[-1].lower() if '.' in fname else ''
             if ext not in ALLOWED_EXTS:
                 continue
