@@ -664,24 +664,24 @@ SUBMIT_HTML = BASE_STYLE + r"""
   <div class="sec">💡 四维度自述（帮助AI更准确评分）</div>
   <div style="display:grid;gap:14px;margin-bottom:4px">
     <div class="fg" style="margin-bottom:0">
-      <label class="lbl" style="color:#6366f1">💡 创新性 — 你的作品如何体现创新？</label>
-      <textarea name="dim_innovation" rows="2" maxlength="400"
+      <label class="lbl">💡 创新性 — 你的作品如何体现创新？<span class="req">*</span></label>
+      <textarea name="dim_innovation" rows="2" maxlength="400" required
         placeholder="例：我用 AI 重新设计了报价流程，从手动填表改为语音输入自动生成，打破了传统工作方式…"
         oninput="updateCount(this,'nc1')"></textarea>
       <div class="char-count"><span id="nc1">0</span> / 400</div>
     </div>
     <div class="fg" style="margin-bottom:0">
-      <label class="lbl" style="color:#10b981">⚙️ 实用性 — 它解决了什么实际问题？效果如何？</label>
-      <textarea name="dim_growth" rows="2" maxlength="400"
+      <label class="lbl">⚙️ 实用性 — 它解决了什么实际问题？效果如何？<span class="req">*</span></label>
+      <textarea name="dim_growth" rows="2" maxlength="400" required
         placeholder="例：每周节省约3小时的手动整理时间，错误率从15%降到2%，已在日常工作中稳定使用2个月…"
         oninput="updateCount(this,'nc2')"></textarea>
       <div class="char-count"><span id="nc2">0</span> / 400</div>
       <div style="margin-top:10px">
-        <div style="font-size:12px;font-weight:600;color:#475569;margin-bottom:8px">📍 作品落地状态</div>
+        <div style="font-size:12px;font-weight:600;color:#475569;margin-bottom:8px">📍 作品落地状态 <span class="req">*</span></div>
         <div style="display:flex;flex-direction:column;gap:6px">
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;
                         background:#f0fdf4;border:1.5px solid #86efac;border-radius:8px;padding:8px 12px">
-            <input type="radio" name="is_deployed" value="已完全落地，正在日常使用中" style="width:auto;accent-color:#10b981">
+            <input type="radio" name="is_deployed" value="已完全落地，正在日常使用中" required style="width:auto;accent-color:#10b981">
             <span>✅ 已完全落地，正在日常使用中</span>
           </label>
           <label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;
@@ -698,15 +698,15 @@ SUBMIT_HTML = BASE_STYLE + r"""
       </div>
     </div>
     <div class="fg" style="margin-bottom:0">
-      <label class="lbl" style="color:#f59e0b">📚 开放学习 — 你是如何学习和迭代的？</label>
-      <textarea name="dim_learning" rows="2" maxlength="400"
+      <label class="lbl">📚 开放学习 — 你是如何学习和迭代的？<span class="req">*</span></label>
+      <textarea name="dim_learning" rows="2" maxlength="400" required
         placeholder="例：我从零开始学习 Prompt 工程，失败了8次后找到有效方法，还在团队内部分享了学习过程…"
         oninput="updateCount(this,'nc3')"></textarea>
       <div class="char-count"><span id="nc3">0</span> / 400</div>
     </div>
     <div class="fg" style="margin-bottom:0">
-      <label class="lbl" style="color:#8b5cf6">🌟 长期影响力 — 它对团队或公司有什么长期价值？</label>
-      <textarea name="dim_impact" rows="2" maxlength="400"
+      <label class="lbl">🌟 长期影响力 — 它对团队或公司有什么长期价值？<span class="req">*</span></label>
+      <textarea name="dim_impact" rows="2" maxlength="400" required
         placeholder="例：这套流程已整理成 SOP，其他同事可以直接复用，预计可推广到3个部门…"
         oninput="updateCount(this,'nc4')"></textarea>
       <div class="char-count"><span id="nc4">0</span> / 400</div>
@@ -1390,18 +1390,23 @@ def submit_post():
             return render_template_string(SUBMIT_HTML, month=month, success=False,
                                           error='请填写姓名和简要说明（必填项）')
 
-        # Parse links
-        raw_links = request.form.getlist('links')
-        links = [u.strip() for u in raw_links if u.strip()]
-        links_json = json.dumps(links, ensure_ascii=False)
-
-        # Four dimension self-assessments
         dim_innovation = request.form.get('dim_innovation','').strip()
         dim_growth     = request.form.get('dim_growth','').strip()
         dim_learning   = request.form.get('dim_learning','').strip()
         dim_impact     = request.form.get('dim_impact','').strip()
         is_deployed    = request.form.get('is_deployed','').strip()
-        email          = request.form.get('email','').strip()
+
+        if not all([dim_innovation, dim_growth, dim_learning, dim_impact, is_deployed]):
+            return render_template_string(SUBMIT_HTML, month=month, success=False,
+                                          error='请完整填写四维度自述并选择落地状态（必填项）')
+
+        # Parse links
+        raw_links = request.form.getlist('links')
+        links = [u.strip() for u in raw_links if u.strip()]
+        links_json = json.dumps(links, ensure_ascii=False)
+
+        # Four dimension self-assessments (already validated above)
+        email = request.form.get('email','').strip()
 
         db = get_db()
         cur = db.execute(
