@@ -7,7 +7,7 @@ AI创新应用月度评审系统 — 在线版 v4
 · 管理员：一键AI评审，自动读取所有文件/链接内容，综合评分 + 详细评语
 """
 
-import os, re, json, sqlite3, secrets, base64, io, subprocess, tempfile
+import os, re, json, sqlite3, secrets, base64, io, subprocess, tempfile, threading
 from datetime import datetime
 from functools import wraps
 from urllib.request import urlopen, Request
@@ -17,6 +17,10 @@ from flask import (
     session, redirect, url_for, g, send_file, abort
 )
 import anthropic
+
+# ── Background job store ───────────────────────────────────────────────────────
+# { job_id: { 'status': 'running'|'done'|'error', 'progress': str, 'result': ... } }
+_jobs: dict = {}
 
 # ── App Config ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -1335,13 +1339,30 @@ async function startEval(){
   document.getElementById('overlay').classList.add('show');
   document.getElementById('evalBtn').disabled=true;
   startStepAnim();
+
   try{
+    // Start background job
     const res=await fetch('/admin/evaluate',{
       method:'POST',headers:{'Content-Type':'application/json'},
       body:JSON.stringify({api_key:apiKey,month:'{{ current_month }}'})
     });
     const data=await res.json();
-    if(!res.ok)throw new Error(data.error||'评审失败');
+    if(!res.ok) throw new Error(data.error||'启动失败');
+    const jobId=data.job_id;
+
+    // Poll for status every 4 seconds
+    await new Promise((resolve,reject)=>{
+      const iv=setInterval(async()=>{
+        try{
+          const sr=await fetch(`/admin/evaluate/status?job_id=${jobId}`);
+          const sd=await sr.json();
+          if(sd.progress) document.querySelector('#overlay p').textContent=sd.progress;
+          if(sd.status==='done'){clearInterval(iv);resolve();}
+          else if(sd.status==='error'){clearInterval(iv);reject(new Error(sd.error||'评审失败'));}
+        }catch(e){clearInterval(iv);reject(e);}
+      },4000);
+    });
+
     toast('🎉 评审完成！');
     setTimeout(()=>location.reload(),800);
   }catch(err){
@@ -1619,91 +1640,101 @@ def admin_delete(sub_id):
     return jsonify({'ok': True})
 
 
-@app.route('/admin/evaluate', methods=['POST'])
-@login_required
-def admin_evaluate():
-    data  = request.get_json()
-    month = data.get('month', datetime.now().strftime('%Y年%m月'))
-    api_key = ANTHROPIC_API_KEY or data.get('api_key','').strip()
-    if not api_key:
-        return jsonify({'error': '请提供 Anthropic API Key'}), 400
+def _run_evaluation(job_id: str, month: str, api_key: str):
+    """Background thread: process all submissions and call Claude."""
+    def upd(msg): _jobs[job_id]['progress'] = msg
 
-    db   = get_db()
-    rows = db.execute(
-        "SELECT * FROM submissions WHERE month=? ORDER BY created_at ASC", (month,)
-    ).fetchall()
-
-    if len(rows) < 1:
-        return jsonify({'error': f'{month} 暂无参赛作品'}), 400
-
-    client = anthropic.Anthropic(api_key=api_key)
-
-    subs_with_content = []
-    # Build email lookup for results display
-    email_map = {dict(row)['name']: dict(row).get('email','') for row in rows}
-
-    for row in rows:
-        s = dict(row)
-        files = db.execute(
-            "SELECT * FROM submission_files WHERE submission_id=?", (s['id'],)
-        ).fetchall()
-        files = [dict(f) for f in files]
-        s['file_count'] = len(files)
-        try:
-            s['content'] = process_submission(s, files, client)
-        except Exception as e:
-            s['content'] = f'[处理出错: {e}]'
-        subs_with_content.append(s)
-
-    prompt = build_eval_prompt(subs_with_content)
     try:
+        upd('正在读取数据库…')
+        db = sqlite3.connect(DB_PATH)
+        db.row_factory = sqlite3.Row
+        rows = db.execute(
+            "SELECT * FROM submissions WHERE month=? ORDER BY created_at ASC", (month,)
+        ).fetchall()
+
+        if not rows:
+            _jobs[job_id] = {'status':'error','progress':'','error':f'{month} 暂无参赛作品'}
+            db.close(); return
+
+        client       = anthropic.Anthropic(api_key=api_key)
+        email_map    = {dict(r)['name']: dict(r).get('email','')       for r in rows}
+        deployed_map = {dict(r)['name']: dict(r).get('is_deployed','') for r in rows}
+
+        subs_with_content = []
+        for i, row in enumerate(rows, 1):
+            s = dict(row)
+            upd(f'正在读取第 {i}/{len(rows)} 份作品：{s["name"]}…')
+            files = [dict(f) for f in db.execute(
+                "SELECT * FROM submission_files WHERE submission_id=?", (s['id'],)
+            ).fetchall()]
+            s['file_count'] = len(files)
+            try:
+                s['content'] = process_submission(s, files, client)
+            except Exception as e:
+                s['content'] = f'[处理出错: {e}]'
+            subs_with_content.append(s)
+
+        upd(f'所有 {len(rows)} 份作品读取完毕，正在请求 Claude 综合评审（可能需要 2-5 分钟）…')
+        prompt  = build_eval_prompt(subs_with_content)
         message = client.messages.create(
             model='claude-opus-4-6', max_tokens=8192,
             messages=[{'role':'user','content':prompt}]
         )
         raw = message.content[0].text.strip()
-    except anthropic.AuthenticationError:
-        return jsonify({'error': 'API Key 无效'}), 400
-    except anthropic.RateLimitError:
-        return jsonify({'error': 'API 请求超限，请稍后重试'}), 429
-    except Exception as e:
-        return jsonify({'error': f'Claude API 错误: {e}'}), 500
 
-    m = re.search(r'\[[\s\S]*\]', raw)
-    if not m:
-        return jsonify({'error': 'Claude 返回格式异常，请重试'}), 500
-    try:
+        upd('Claude 评审完成，正在解析结果…')
+        m = re.search(r'\[[\s\S]*\]', raw)
+        if not m:
+            _jobs[job_id] = {'status':'error','progress':'','error':'Claude 返回格式异常，请重试'}
+            db.close(); return
         results = json.loads(m.group(0))
-    except Exception:
-        return jsonify({'error': '解析结果失败，请重试'}), 500
 
-    # Build a lookup: name -> is_deployed status
-    deployed_map = {dict(row)['name']: dict(row).get('is_deployed','') for row in rows}
+        FULLY_DEPLOYED = '已完全落地，正在日常使用中'
+        for r in results:
+            r['total']       = sum(r.get(k,0) for k in ('innovation','practicality','learning_depth','impact'))
+            r['is_deployed'] = deployed_map.get(r.get('name',''), '')
+            r['email']       = email_map.get(r.get('name',''), '')
 
-    for r in results:
-        r['total'] = (r.get('innovation',0)+r.get('practicality',0)+
-                      r.get('learning_depth',0)+r.get('impact',0))
-        r['is_deployed'] = deployed_map.get(r.get('name',''), '')
+        fully  = sorted([r for r in results if r.get('is_deployed')==FULLY_DEPLOYED],
+                        key=lambda x: x.get('total',0), reverse=True)
+        others = sorted([r for r in results if r.get('is_deployed')!=FULLY_DEPLOYED],
+                        key=lambda x: x.get('total',0), reverse=True)
+        results = fully + others
 
-    # Hard rule: #1 must be fully deployed; demote others to 2nd place at earliest
-    FULLY_DEPLOYED = '已完全落地，正在日常使用中'
-    results.sort(key=lambda x: x.get('total',0), reverse=True)
+        db.execute("INSERT INTO evaluations (month,results_json) VALUES (?,?)",
+                   (month, json.dumps(results, ensure_ascii=False)))
+        db.commit(); db.close()
+        _jobs[job_id] = {'status':'done','progress':'评审完成！','results': results}
 
-    fully = [r for r in results if r.get('is_deployed') == FULLY_DEPLOYED]
-    others = [r for r in results if r.get('is_deployed') != FULLY_DEPLOYED]
-    # Re-sort each group by score, then concatenate: fully deployed first
-    fully.sort(key=lambda x: x.get('total',0), reverse=True)
-    others.sort(key=lambda x: x.get('total',0), reverse=True)
-    results = fully + others
+    except anthropic.AuthenticationError:
+        _jobs[job_id] = {'status':'error','progress':'','error':'API Key 无效'}
+    except anthropic.RateLimitError:
+        _jobs[job_id] = {'status':'error','progress':'','error':'API 请求超限，请稍后重试'}
+    except Exception as e:
+        import traceback
+        _jobs[job_id] = {'status':'error','progress':'','error':f'评审出错：{e}'}
 
-    # Attach email to each result for display
-    for r in results:
-        r['email'] = email_map.get(r.get('name',''), '')
 
-    db.execute("INSERT INTO evaluations (month,results_json) VALUES (?,?)",
-               (month, json.dumps(results, ensure_ascii=False)))
-    db.commit()
-    return jsonify({'ok': True, 'results': results})
+@app.route('/admin/evaluate', methods=['POST'])
+@login_required
+def admin_evaluate():
+    data    = request.get_json()
+    month   = data.get('month', datetime.now().strftime('%Y年%m月'))
+    api_key = ANTHROPIC_API_KEY or data.get('api_key','').strip()
+    if not api_key:
+        return jsonify({'error': '请提供 Anthropic API Key'}), 400
+    job_id = secrets.token_hex(8)
+    _jobs[job_id] = {'status':'running','progress':'正在启动评审…'}
+    threading.Thread(target=_run_evaluation, args=(job_id, month, api_key), daemon=True).start()
+    return jsonify({'job_id': job_id})
+
+
+@app.route('/admin/evaluate/status')
+@login_required
+def admin_evaluate_status():
+    job = _jobs.get(request.args.get('job_id',''))
+    if not job: return jsonify({'status':'error','error':'任务不存在'}), 404
+    return jsonify(job)
 
 
 @app.route('/submit-link')
