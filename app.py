@@ -1108,6 +1108,7 @@ DASHBOARD_HTML = BASE_STYLE + r"""
     <div class="topbar-actions">
       <span class="pill">{{ current_month }} · {{ month_count }}份</span>
       <span class="pill">✉️ 已发送 {{ sent_names|length }}/{{ month_count }}</span>
+      <a href="/admin/sent-history" class="btn" style="background:rgba(255,255,255,.2);color:#fff;font-size:12px;padding:7px 14px">📋 发送记录</a>
       <a href="/submit-link" class="btn" style="background:rgba(255,255,255,.2);color:#fff;font-size:12px;padding:7px 14px">🔗 员工链接</a>
       <a href="/admin/logout" class="btn" style="background:rgba(255,255,255,.15);color:#fff;font-size:12px;padding:7px 14px">退出</a>
     </div>
@@ -1456,6 +1457,65 @@ FILES_HTML = BASE_STYLE + """
 """
 
 
+# ── Sent History page ──────────────────────────────────────────────────────────
+SENT_HISTORY_HTML = BASE_STYLE + """
+<style>
+body{padding:32px 20px;max-width:760px;margin:0 auto;}
+.sh-topbar{display:flex;align-items:center;justify-content:space-between;margin-bottom:28px;}
+.sh-topbar h2{font-size:20px;font-weight:700;margin:0;}
+.month-block{margin-bottom:32px;}
+.month-title{font-size:15px;font-weight:700;color:var(--p);margin-bottom:12px;
+  padding-bottom:8px;border-bottom:2px solid var(--p);}
+.sent-row{display:flex;align-items:center;gap:14px;background:#fff;
+  border:1.5px solid var(--bd);border-radius:10px;padding:12px 16px;margin-bottom:8px;}
+.sent-avatar{width:36px;height:36px;border-radius:50%;background:linear-gradient(135deg,#6366f1,#8b5cf6);
+  display:flex;align-items:center;justify-content:center;color:#fff;font-size:15px;font-weight:700;flex-shrink:0;}
+.sent-info{flex:1;min-width:0;}
+.sent-name{font-size:14px;font-weight:600;color:var(--t1);}
+.sent-email{font-size:12px;color:var(--t3);margin-top:2px;}
+.sent-time{font-size:12px;color:var(--t3);white-space:nowrap;}
+.sent-badge{background:#d1fae5;color:#065f46;font-size:11px;font-weight:600;
+  padding:3px 9px;border-radius:999px;white-space:nowrap;}
+.empty-state{text-align:center;padding:60px 20px;color:var(--t3);}
+.empty-state .icon{font-size:48px;margin-bottom:12px;}
+</style>
+
+<div class="sh-topbar">
+  <h2>📋 评语发送记录</h2>
+  <a href="/admin/dashboard" class="btn" style="background:#f1f5f9;color:var(--t1);">← 返回后台</a>
+</div>
+
+{% if not history %}
+<div class="empty-state">
+  <div class="icon">📭</div>
+  <p>暂无发送记录</p>
+  <p style="font-size:13px;margin-top:6px">在评审结果页面点击「发送评语」按钮后，记录会出现在这里</p>
+</div>
+{% else %}
+  <p style="color:var(--t3);font-size:13px;margin-bottom:24px">
+    共发送 <strong style="color:var(--t1)">{{ total_sent }}</strong> 条评语，
+    涉及 <strong style="color:var(--t1)">{{ history|length }}</strong> 个月份
+  </p>
+  {% for group in history %}
+  <div class="month-block">
+    <div class="month-title">{{ group.month }} · 已发送 {{ group.records|length }} 人</div>
+    {% for rec in group.records %}
+    <div class="sent-row">
+      <div class="sent-avatar">{{ rec.name[0] if rec.name else '?' }}</div>
+      <div class="sent-info">
+        <div class="sent-name">{{ rec.name }}</div>
+        {% if rec.email %}<div class="sent-email">{{ rec.email }}</div>{% endif %}
+      </div>
+      <div class="sent-time">{{ rec.sent_at }}</div>
+      <span class="sent-badge">✅ 已发送</span>
+    </div>
+    {% endfor %}
+  </div>
+  {% endfor %}
+{% endif %}
+"""
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  ROUTES
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1799,6 +1859,39 @@ def admin_mark_sent():
     db.execute("INSERT OR IGNORE INTO email_sent (month, name) VALUES (?,?)", (month, name))
     db.commit()
     return jsonify({'ok': True})
+
+
+@app.route('/admin/sent-history')
+@login_required
+def admin_sent_history():
+    db = get_db()
+    # Fetch all sent records joined with submission email
+    rows = db.execute("""
+        SELECT es.month, es.name, es.sent_at,
+               (SELECT s.email FROM submissions s
+                WHERE s.name = es.name AND s.month = es.month
+                ORDER BY s.id DESC LIMIT 1) AS email
+        FROM email_sent es
+        ORDER BY es.month DESC, es.sent_at DESC
+    """).fetchall()
+
+    # Group by month
+    from collections import OrderedDict
+    groups = OrderedDict()
+    for r in rows:
+        m = r['month']
+        if m not in groups:
+            groups[m] = []
+        groups[m].append({
+            'name':    r['name'],
+            'email':   r['email'] or '',
+            'sent_at': r['sent_at'],
+        })
+
+    history = [{'month': m, 'records': recs} for m, recs in groups.items()]
+    total_sent = sum(len(g['records']) for g in history)
+
+    return render_template_string(SENT_HISTORY_HTML, history=history, total_sent=total_sent)
 
 
 @app.route('/submit-link')
