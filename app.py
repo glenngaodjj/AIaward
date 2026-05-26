@@ -18,9 +18,6 @@ from flask import (
 )
 import anthropic
 
-# ── Background job store ───────────────────────────────────────────────────────
-# { job_id: { 'status': 'running'|'done'|'error', 'progress': str, 'result': ... } }
-_jobs: dict = {}
 
 # ── App Config ─────────────────────────────────────────────────────────────────
 app = Flask(__name__)
@@ -110,6 +107,13 @@ def init_db():
                 month        TEXT NOT NULL,
                 results_json TEXT NOT NULL,
                 created_at   TEXT DEFAULT (datetime('now','localtime'))
+            );
+            CREATE TABLE IF NOT EXISTS eval_jobs (
+                id         TEXT PRIMARY KEY,
+                status     TEXT NOT NULL DEFAULT 'running',
+                progress   TEXT DEFAULT '',
+                error      TEXT DEFAULT '',
+                created_at TEXT DEFAULT (datetime('now','localtime'))
             );
         """)
         # Migration: add new columns to submissions if missing
@@ -1640,12 +1644,25 @@ def admin_delete(sub_id):
     return jsonify({'ok': True})
 
 
-def _run_evaluation(job_id: str, month: str, api_key: str):
-    """Background thread: process all submissions and call Claude."""
-    def upd(msg): _jobs[job_id]['progress'] = msg
+def _job_update(job_id: str, progress: str):
+    db = sqlite3.connect(DB_PATH)
+    db.execute("UPDATE eval_jobs SET progress=? WHERE id=?", (progress, job_id))
+    db.commit(); db.close()
 
+def _job_error(job_id: str, error: str):
+    db = sqlite3.connect(DB_PATH)
+    db.execute("UPDATE eval_jobs SET status='error', error=? WHERE id=?", (error, job_id))
+    db.commit(); db.close()
+
+def _job_done(job_id: str):
+    db = sqlite3.connect(DB_PATH)
+    db.execute("UPDATE eval_jobs SET status='done', progress='评审完成！' WHERE id=?", (job_id,))
+    db.commit(); db.close()
+
+
+def _run_evaluation(job_id: str, month: str, api_key: str):
     try:
-        upd('正在读取数据库…')
+        _job_update(job_id, '正在读取数据库…')
         db = sqlite3.connect(DB_PATH)
         db.row_factory = sqlite3.Row
         rows = db.execute(
@@ -1653,7 +1670,7 @@ def _run_evaluation(job_id: str, month: str, api_key: str):
         ).fetchall()
 
         if not rows:
-            _jobs[job_id] = {'status':'error','progress':'','error':f'{month} 暂无参赛作品'}
+            _job_error(job_id, f'{month} 暂无参赛作品')
             db.close(); return
 
         client       = anthropic.Anthropic(api_key=api_key)
@@ -1663,7 +1680,7 @@ def _run_evaluation(job_id: str, month: str, api_key: str):
         subs_with_content = []
         for i, row in enumerate(rows, 1):
             s = dict(row)
-            upd(f'正在读取第 {i}/{len(rows)} 份作品：{s["name"]}…')
+            _job_update(job_id, f'正在读取第 {i}/{len(rows)} 份作品：{s["name"]}…')
             files = [dict(f) for f in db.execute(
                 "SELECT * FROM submission_files WHERE submission_id=?", (s['id'],)
             ).fetchall()]
@@ -1674,7 +1691,7 @@ def _run_evaluation(job_id: str, month: str, api_key: str):
                 s['content'] = f'[处理出错: {e}]'
             subs_with_content.append(s)
 
-        upd(f'所有 {len(rows)} 份作品读取完毕，正在请求 Claude 综合评审（可能需要 2-5 分钟）…')
+        _job_update(job_id, f'所有 {len(rows)} 份作品读取完毕，正在请求 Claude 评审（约 2-5 分钟）…')
         prompt  = build_eval_prompt(subs_with_content)
         message = client.messages.create(
             model='claude-opus-4-6', max_tokens=8192,
@@ -1682,11 +1699,10 @@ def _run_evaluation(job_id: str, month: str, api_key: str):
         )
         raw = message.content[0].text.strip()
 
-        upd('Claude 评审完成，正在解析结果…')
+        _job_update(job_id, '正在解析结果…')
         m = re.search(r'\[[\s\S]*\]', raw)
         if not m:
-            _jobs[job_id] = {'status':'error','progress':'','error':'Claude 返回格式异常，请重试'}
-            db.close(); return
+            _job_error(job_id, 'Claude 返回格式异常，请重试'); db.close(); return
         results = json.loads(m.group(0))
 
         FULLY_DEPLOYED = '已完全落地，正在日常使用中'
@@ -1704,15 +1720,14 @@ def _run_evaluation(job_id: str, month: str, api_key: str):
         db.execute("INSERT INTO evaluations (month,results_json) VALUES (?,?)",
                    (month, json.dumps(results, ensure_ascii=False)))
         db.commit(); db.close()
-        _jobs[job_id] = {'status':'done','progress':'评审完成！','results': results}
+        _job_done(job_id)
 
     except anthropic.AuthenticationError:
-        _jobs[job_id] = {'status':'error','progress':'','error':'API Key 无效'}
+        _job_error(job_id, 'API Key 无效')
     except anthropic.RateLimitError:
-        _jobs[job_id] = {'status':'error','progress':'','error':'API 请求超限，请稍后重试'}
+        _job_error(job_id, 'API 请求超限，请稍后重试')
     except Exception as e:
-        import traceback
-        _jobs[job_id] = {'status':'error','progress':'','error':f'评审出错：{e}'}
+        _job_error(job_id, f'评审出错：{e}')
 
 
 @app.route('/admin/evaluate', methods=['POST'])
@@ -1723,8 +1738,10 @@ def admin_evaluate():
     api_key = ANTHROPIC_API_KEY or data.get('api_key','').strip()
     if not api_key:
         return jsonify({'error': '请提供 Anthropic API Key'}), 400
-    job_id = secrets.token_hex(8)
-    _jobs[job_id] = {'status':'running','progress':'正在启动评审…'}
+    job_id = secrets.token_hex(12)
+    db = get_db()
+    db.execute("INSERT INTO eval_jobs (id, status, progress) VALUES (?, 'running', '正在启动评审…')", (job_id,))
+    db.commit()
     threading.Thread(target=_run_evaluation, args=(job_id, month, api_key), daemon=True).start()
     return jsonify({'job_id': job_id})
 
@@ -1732,9 +1749,12 @@ def admin_evaluate():
 @app.route('/admin/evaluate/status')
 @login_required
 def admin_evaluate_status():
-    job = _jobs.get(request.args.get('job_id',''))
-    if not job: return jsonify({'status':'error','error':'任务不存在'}), 404
-    return jsonify(job)
+    job_id = request.args.get('job_id', '')
+    db  = get_db()
+    row = db.execute("SELECT * FROM eval_jobs WHERE id=?", (job_id,)).fetchone()
+    if not row:
+        return jsonify({'status':'error','error':'任务不存在'}), 404
+    return jsonify(dict(row))
 
 
 @app.route('/submit-link')
