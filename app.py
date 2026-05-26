@@ -115,6 +115,13 @@ def init_db():
                 error      TEXT DEFAULT '',
                 created_at TEXT DEFAULT (datetime('now','localtime'))
             );
+            CREATE TABLE IF NOT EXISTS email_sent (
+                id         INTEGER PRIMARY KEY AUTOINCREMENT,
+                month      TEXT NOT NULL,
+                name       TEXT NOT NULL,
+                sent_at    TEXT DEFAULT (datetime('now','localtime')),
+                UNIQUE(month, name)
+            );
         """)
         # Migration: add new columns to submissions if missing
         for col, definition in [
@@ -1100,6 +1107,7 @@ DASHBOARD_HTML = BASE_STYLE + r"""
     </div>
     <div class="topbar-actions">
       <span class="pill">{{ current_month }} · {{ month_count }}份</span>
+      <span class="pill">✉️ 已发送 {{ sent_names|length }}/{{ month_count }}</span>
       <a href="/submit-link" class="btn" style="background:rgba(255,255,255,.2);color:#fff;font-size:12px;padding:7px 14px">🔗 员工链接</a>
       <a href="/admin/logout" class="btn" style="background:rgba(255,255,255,.15);color:#fff;font-size:12px;padding:7px 14px">退出</a>
     </div>
@@ -1218,11 +1226,14 @@ DASHBOARD_HTML = BASE_STYLE + r"""
         {% if r.get('email') %}
         <div style="margin-top:12px;display:flex;align-items:center;gap:10px;flex-wrap:wrap">
           <span style="font-size:12px;color:var(--t3)">✉️ {{ r.email }}</span>
+          {% set already_sent = r.name in sent_names %}
           <a href="https://mail.google.com/mail/?view=cm&to={{ r.email | urlencode }}&su={{ ('DJJ AI创新评选 — 你的专属评语') | urlencode }}&body={{ ('Hi ' + r.name + '，\n\n感谢参与本月 DJJ AI 创新评选！以下是评审对你作品的专属评语：\n\n💡 创新性\n' + r.get('comment_innovation','') + '\n\n⚙️ 实用性\n' + r.get('comment_growth','') + '\n\n📚 开放学习\n' + r.get('comment_learning','') + '\n\n🌟 长期影响力\n' + r.get('comment_impact','') + '\n\nDJJ 管理团队') | urlencode }}"
-             target="_blank"
-             style="font-size:12px;padding:5px 12px;background:#ede9fe;color:#6d28d9;
-                    border-radius:7px;text-decoration:none;font-weight:600">
-            ✉️ 发送评语给 {{ r.name }}
+             target="_blank" onclick="markSent('{{ r.name }}')"
+             id="sendbtn_{{ loop.index }}"
+             style="font-size:12px;padding:5px 12px;border-radius:7px;text-decoration:none;font-weight:600;
+                    background:{{ '#d1fae5' if already_sent else '#ede9fe' }};
+                    color:{{ '#065f46' if already_sent else '#6d28d9' }}">
+            {{ '✅ 已发送' if already_sent else '✉️ 发送评语给 ' + r.name }}
           </a>
         </div>
         {% endif %}
@@ -1381,6 +1392,21 @@ async function startEval(){
 requestAnimationFrame(()=>requestAnimationFrame(()=>{
   document.querySelectorAll('.bar-fill').forEach(b=>{b.style.width=b.dataset.w;});
 }));
+
+async function markSent(name){
+  await fetch('/admin/mark_sent',{
+    method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({month:'{{ current_month }}', name: name})
+  });
+  // Update button appearance immediately
+  document.querySelectorAll('a[onclick*="markSent"]').forEach(a=>{
+    if(a.getAttribute('onclick').includes(JSON.stringify(name))){
+      a.textContent='✅ 已发送';
+      a.style.background='#d1fae5';
+      a.style.color='#065f46';
+    }
+  });
+}
 </script>
 """
 
@@ -1587,6 +1613,9 @@ def admin_dashboard():
 
     total_count = db.execute("SELECT COUNT(*) FROM submissions").fetchone()[0]
     eval_count  = db.execute("SELECT COUNT(*) FROM evaluations").fetchone()[0]
+    sent_names  = {r[0] for r in db.execute(
+        "SELECT name FROM email_sent WHERE month=?", (current_month,)
+    ).fetchall()}
 
     latest_eval = None
     eval_row = db.execute(
@@ -1602,6 +1631,7 @@ def admin_dashboard():
         total_count=total_count, eval_count=eval_count,
         filtered_subs=filtered_subs, latest_eval=latest_eval,
         api_key_set=bool(ANTHROPIC_API_KEY),
+        sent_names=sent_names,
     )
 
 
@@ -1755,6 +1785,20 @@ def admin_evaluate_status():
     if not row:
         return jsonify({'status':'error','error':'任务不存在'}), 404
     return jsonify(dict(row))
+
+
+@app.route('/admin/mark_sent', methods=['POST'])
+@login_required
+def admin_mark_sent():
+    data  = request.get_json()
+    month = data.get('month','')
+    name  = data.get('name','')
+    if not month or not name:
+        return jsonify({'ok': False}), 400
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO email_sent (month, name) VALUES (?,?)", (month, name))
+    db.commit()
+    return jsonify({'ok': True})
 
 
 @app.route('/submit-link')
